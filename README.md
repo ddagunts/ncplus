@@ -106,7 +106,8 @@ Requirements: an LG NetCast 4.x TV with a root shell (telnet), and a FAT32 USB s
 Getting that root shell is model- and firmware-specific and is not covered here; see the
 [openlgtv](https://github.com/openlgtv) community.
 
-1. Build `dist/netcast-plus.zip` (see [Building](#building)) and unzip it onto the root of the stick.
+1. Download `netcast-plus-<version>.zip` from [Releases](https://github.com/ddagunts/ncplus/releases)
+   (or build it, see [Building](#building)) and unzip it onto the root of the stick.
    You get a `netcast/` folder.
 2. Plug the stick into the TV.
 3. From the TV's shell:
@@ -159,6 +160,7 @@ make -C src                           # libnc, launcher, apps, tools
 # 4. The USB package
 build/package.sh                      # -> dist/netcast-plus.zip
 build/package.sh --with-tyrian-data   #    ... with the Tyrian 2.1 freeware data (see its EULA)
+build/package.sh --release            #    ... as published: no chroot image, kernel modules or Tyrian data
 ```
 
 Optional:

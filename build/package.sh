@@ -5,15 +5,21 @@
 #   --with-tyrian-data   bundle the Tyrian 2.1 freeware data (see LICENSES/NOTICE.txt)
 #   --no-dev             leave out the developer extras (chroot image + enter.sh/teardown.sh, static
 #                        busybox, nckey/evdump/ncdebug/peek/sniff)
+#   --release            public release build: no chroot image (it holds LG's glibc and the SDK's
+#                        GPL userland), no untested kernel modules, no Tyrian data
 set -euo pipefail
-WITH_TYRIAN=0 WITH_DEV=1
+WITH_TYRIAN=0 WITH_DEV=1 RELEASE=0
 for a in "$@"; do
   case "$a" in
     --with-tyrian-data) WITH_TYRIAN=1 ;;
     --no-dev) WITH_DEV=0 ;;
+    --release) RELEASE=1 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
 done
+if [ "$RELEASE" = 1 ] && [ "$WITH_TYRIAN" = 1 ]; then
+  echo "--release: the Tyrian data carries a 1995 EULA, not bundling it" >&2; WITH_TYRIAN=0
+fi
 cd "$(dirname "$0")/.."
 TOP=$PWD
 OUT=$TOP/src/out          # binaries (make -C src, third_party/build-deps.sh)
@@ -89,6 +95,12 @@ if [ -d "$OUT/retroarch" ]; then
   rm -f "$P/apps/retroarch/info/core_info.cache"
   cp "$OUT/retroarch/roms/240p Test Suite/LICENSE.txt" "$P/LICENSES/240p-Test-Suite-GPL-2.0.txt"
   cp "$TOP/third_party/retro/RetroArch/COPYING" "$P/LICENSES/RetroArch-GPL-3.0.txt" 2>/dev/null || true
+  R=$TOP/third_party/retro
+  for lic in libretro-fceumm/Copying:fceumm-GPL-2.0 snes9x2005/copyright:snes9x2005 \
+             gambatte-libretro/COPYING:gambatte-GPL-2.0 Genesis-Plus-GX/LICENSE.txt:genesis_plus_gx-noncommercial \
+             gpsp/COPYING:gpsp-GPL-2.0 pcsx_rearmed/COPYING:pcsx_rearmed-GPL-2.0; do
+    cp "$R/${lic%%:*}" "$P/LICENSES/libretro-${lic#*:}.txt"
+  done
 fi
 
 # --- Media player (hardware decoding via GStreamer 0.10 / mtkvideosink) ---
@@ -196,7 +208,7 @@ NOTE
 fi
 
 # --- Kernel modules for the stock 3.0.13 kernel (never loaded automatically) ---
-if [ -f "$TOP/src/kmod/xpad.ko" ]; then   # third_party/build-deps.sh kmod
+if [ "$RELEASE" = 0 ] && [ -f "$TOP/src/kmod/xpad.ko" ]; then   # third_party/build-deps.sh kmod
   mkdir -p "$P/tools/modules"
   cp "$TOP/src/kmod/nchello.ko" "$TOP/src/kmod/xpad.ko" "$P/tools/modules/"
 fi
@@ -208,8 +220,12 @@ if [ "$WITH_DEV" = 1 ]; then
   BBX=$U/busybox; [ -f "$BBX" ] || BBX=$TOP/build/busybox-1.36.1/busybox
   if [ -f "$BBX" ]; then
     cp "$BBX" "$P/busybox"
+    cp "$TOP/build/busybox-1.36.1/LICENSE" "$P/LICENSES/BusyBox-GPL-2.0.txt" 2>/dev/null \
+      || echo "warning: BusyBox LICENSE not found (build/busybox-1.36.1/)" >&2
     cp "$U/enter.sh" "$U/teardown.sh" "$P/"
-    if [ -f "$U/netcast-root.ext4.gz" ]; then
+    if [ "$RELEASE" = 1 ]; then
+      echo "note: --release: no chroot image; build your own with build/build-image.sh" >&2
+    elif [ -f "$U/netcast-root.ext4.gz" ]; then
       gunzip -c "$U/netcast-root.ext4.gz" > "$P/netcast-root.ext4"
     else
       echo "note: no chroot image (run tools/pull-glibc.sh && build/build-image.sh); Terminal uses the TV shell" >&2
@@ -328,7 +344,8 @@ Tools (in tools/, started automatically by start.sh where noted)
   nclite stop|start|list  stop/restart optional LG services (browsers, voice, Skype...) for RAM
 
 Developer extras (left out with build/package.sh --no-dev)
-  sh enter.sh             chroot into the bundled userland (netcast-root.ext4: Python, GCC, ...);
+  sh enter.sh             chroot into the userland image netcast-root.ext4 (Python, GCC, ...) if it is in
+                          this folder (release zips don't ship it: build it with build/build-image.sh);
                           mounted at /tmp/ncroot, writes go only into the image file on this stick.
                           The Terminal app opens it automatically.
   sh teardown.sh          unmount the chroot again (exit its shells first)
@@ -364,6 +381,10 @@ cp "$TOP/LICENSE" "$P/LICENSES/NetCast+-MIT.txt"
 cat > "$P/LICENSES/NOTICE.txt" <<'EOF'
 NetCast+ itself: MIT (NetCast+-MIT.txt); the kernel modules in tools/modules are GPL-2.0.
 
+Source code: NetCast+ and the exact build recipe for every bundled program are at
+https://github.com/ddagunts/ncplus (third_party/build-deps.sh pins each upstream release or git
+commit, with checksums). The upstream sources are available from the projects listed below.
+
 Bundled components:
   Chocolate Doom 3.1.1 (GPL-2.0) - https://github.com/chocolate-doom/chocolate-doom
   Freedoom 0.13.0 (BSD-3-Clause)  - https://freedoom.github.io
@@ -372,8 +393,10 @@ Bundled components:
   FreeType (FreeType License), statically linked into the launcher/input test/photos
   stb_image (public domain / MIT) - https://github.com/nothings/stb
   OpenTyrian (GPL-2.0) - https://github.com/opentyrian/opentyrian   [only with --with-tyrian-data]
-  RetroArch 1.22.2 (GPL-3.0) + libretro cores: fceumm, snes9x2005, gambatte, gpsp, genesis_plus_gx,
-    pcsx_rearmed (GPL/various) - https://github.com/libretro
+  RetroArch 1.22.2 (GPL-3.0) + libretro cores - https://github.com/libretro
+    fceumm, gambatte, gpsp, pcsx_rearmed (GPL-2.0); snes9x2005 (see libretro-snes9x2005.txt);
+    genesis_plus_gx (non-commercial license: may not be sold or used commercially)
+  BusyBox 1.36.1 (GPL-2.0, static) - https://busybox.net
   240p Test Suite (GPL-2.0) - https://github.com/pinobatch/240p-test-mini
   libsmb2 6.3 (LGPL-2.1, statically linked into Network Shares/smbgw; full source and build scripts are in
     the NetCast+ tree, so they can be relinked against a modified libsmb2) - https://github.com/sahlberg/libsmb2
