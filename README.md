@@ -160,7 +160,7 @@ make -C src                           # libnc, launcher, apps, tools
 # 4. The USB package
 build/package.sh                      # -> dist/netcast-plus.zip
 build/package.sh --with-tyrian-data   #    ... with the Tyrian 2.1 freeware data (see its EULA)
-build/package.sh --release            #    ... as published: no chroot image, kernel modules or Tyrian data
+build/package.sh --release            #    ... as published: no chroot image or Tyrian data; xpadone.ko only
 ```
 
 Optional:
@@ -214,12 +214,15 @@ Working on an LG NetCast 4.5 TV (software v04.03.10, May 2017): native GLES2 app
 audio, Doom, Tyrian, Photos, RetroArch, the hardware video player, launcher, backlight control,
 screen saver and keep-awake.
 
-Built, waiting for a test on the TV: Settings (LVGL), Terminal, Remote Desktop (FreeRDP), kernel
-modules (nchello). Tested: `xpadone.ko` (Xbox One/Series wired pads). Qt 6 / QML is being cross-built.
+Kernel modules load on the stock kernel: `xpadone.ko` adds Xbox One/Series wired pads (Xbox 360 and PS3
+pads work out of the box). Gamepads navigate the launcher, Photos and the Player, and work in Doom.
+
+Built, waiting for a test on the TV: Settings (LVGL), Terminal, Remote Desktop (FreeRDP). Qt 6 / QML is
+being cross-built.
 
 Next:
-- Load the first kernel module once its `struct module` layout is checked against LG's modules; then
-  USB serial, tun/VPN, SMB.
+- More kernel modules: USB serial, tun/VPN (check struct offsets against LG's kernel, see FINDINGS.md).
+- Mute the TV while the screen saver is dark.
 - Magic Remote pointer support.
 - More apps: ScummVM, a file browser, a lightweight browser.
 - A newer kernel (e.g. Sony's MT53xx 3.10 tree) is only a research item: LG's display, GPU,

@@ -6,7 +6,7 @@
 #   --no-dev             leave out the developer extras (chroot image + enter.sh/teardown.sh, static
 #                        busybox, nckey/evdump/ncdebug/peek/sniff)
 #   --release            public release build: no chroot image (it holds LG's glibc and the SDK's
-#                        GPL userland), no untested kernel modules, no Tyrian data
+#                        GPL userland), no Tyrian data; of the kernel modules only the tested xpadone.ko
 set -euo pipefail
 WITH_TYRIAN=0 WITH_DEV=1 RELEASE=0
 for a in "$@"; do
@@ -198,9 +198,13 @@ fi
 # --- Kernel modules for the stock 3.0.13 kernel (start.sh loads xpadone.ko on the verified kernel only) ---
 # xpad.ko is not shipped: the TV has xpad built in, and our build writes input_dev fields at vanilla
 # offsets that are wrong for LG's kernel (see FINDINGS.md). xpadone.ko adds Xbox One/Series pads.
-if [ "$RELEASE" = 0 ] && [ -f "$TOP/src/kmod/xpadone.ko" ]; then   # third_party/build-deps.sh kmod
+if [ -f "$TOP/src/kmod/xpadone.ko" ]; then   # third_party/build-deps.sh kmod
   mkdir -p "$P/tools/modules"
-  cp "$TOP/src/kmod/nchello.ko" "$TOP/src/kmod/xpadone.ko" "$P/tools/modules/"
+  cp "$TOP/src/kmod/xpadone.ko" "$P/tools/modules/"
+  [ "$RELEASE" = 0 ] && cp "$TOP/src/kmod/nchello.ko" "$P/tools/modules/"   # test module, dev builds only
+  cp "$TOP/third_party/kernel/linux-3.0.13/COPYING" "$P/LICENSES/Linux-kernel-modules-GPL-2.0.txt"
+elif [ "$RELEASE" = 1 ]; then
+  echo "--release: src/kmod/xpadone.ko missing (third_party/build-deps.sh kmod)" >&2; exit 1
 fi
 
 # --- Developer extras: static busybox, chroot userland (enter.sh / teardown.sh), debug tools ---
@@ -330,7 +334,7 @@ Use
   Arrows move, OK launches. "Exit to TV" returns to LG's home screen.
   Inside apps, the remote's BACK key is Escape ("back / menu"). Volume and Mute work in every app.
   Gamepads: PS3 and wired Xbox 360 pads work out of the box. Wired Xbox One/Series pads need
-        tools/modules/xpadone.ko (developer builds), which start.sh loads on the kernel it was tested on.
+        tools/modules/xpadone.ko, which start.sh loads on the kernel it was tested on.
   Settings, servers and URLs: all in netcast.conf at the root of the USB stick, next to the
         netcast/ folder (created on first start). Upgrades only replace netcast/, so it is kept.
   Photos: set url= in the [photos] section of netcast.conf to a server with directory listings
@@ -390,7 +394,8 @@ cp "$TOP/third_party/SDL2-2.32.10/LICENSE.txt" "$P/LICENSES/SDL2-zlib.txt"
 cp "$TOP/third_party/SDL2_mixer-2.8.2/LICENSE.txt" "$P/LICENSES/SDL2_mixer-zlib.txt"
 cp "$TOP/LICENSE" "$P/LICENSES/NetCast+-MIT.txt"
 cat > "$P/LICENSES/NOTICE.txt" <<'EOF'
-NetCast+ itself: MIT (NetCast+-MIT.txt); the kernel modules in tools/modules are GPL-2.0.
+NetCast+ itself: MIT (NetCast+-MIT.txt); the kernel modules in tools/modules are GPL-2.0
+(Linux-kernel-modules-GPL-2.0.txt; source in src/kmod/ of the repository).
 
 Source code: NetCast+ and the exact build recipe for every bundled program are at
 https://github.com/ddagunts/ncplus (third_party/build-deps.sh pins each upstream release or git
