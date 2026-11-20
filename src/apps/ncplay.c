@@ -115,6 +115,7 @@ int main(int argc, char **argv) {
 
     nc_config cfg = {0};
     if (nc_init(&cfg) != 0) return 2;
+    nc_pad_keys(1);
     ncgfx_init();
     nctext_font *fbig = nctext_open(NULL, 40), *fmed = nctext_open(NULL, 28), *fsm = nctext_open(NULL, 22);
     if (!fbig || !fmed || !fsm) nc_exit(3);
@@ -232,7 +233,7 @@ int main(int argc, char **argv) {
                 if (i == sel) ncgfx_rect(50, y - 32, 1180, 40, NC_RGBA(50, 90, 200, 255));
                 nctext_draw(fmed, 80, y - 5, names[i], NC_RGBA(255, 255, 255, 255));
             }
-            if (nent == 0) nctext_draw(fmed, 80, 200, "No entries: add Name=URI lines to apps/player/streams.conf", NC_RGBA(220, 220, 220, 255));
+            if (nent == 0) nctext_draw(fmed, 80, 200, "No entries: add Name=URI lines to [player] in netcast.conf", NC_RGBA(220, 220, 220, 255));
             ncgfx_rect(0, 720 - 50, 1280, 50, NC_RGBA(22, 28, 50, 255));
             nctext_draw(fsm, 60, 720 - 18, status[0] ? status : "OK play   BACK exit", NC_RGBA(200, 205, 220, 255));
         }

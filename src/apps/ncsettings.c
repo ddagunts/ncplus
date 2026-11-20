@@ -2,7 +2,7 @@
  * ncsettings: NetCast+ settings, built with LVGL 9 on the SDL2 "netcast" driver.
  *
  * Remote: UP/DOWN move between rows, OK toggles / opens, LEFT/RIGHT change values,
- *         BACK (Escape) closes. Settings are saved to $HOME/settings.conf (on the USB stick)
+ *         BACK (Escape) closes. Settings are saved to the [settings] section of netcast.conf (on the USB stick)
  *         and applied immediately; start.sh applies them again at every startup.
  *
  *   SAVER_MIN=20   screen saver minutes (0 = off)
@@ -18,6 +18,7 @@
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <strings.h>
 
 static char base[512], tools[512], conf[512];
 static int saver_min = 20, nosleep = 1, lite = 0;
@@ -25,22 +26,72 @@ static const int saver_opts[] = {0, 5, 10, 20, 30, 60};
 static lv_group_t *grp;
 static lv_obj_t *status_lbl, *info_lbl, *dd_saver, *sw_nosleep, *sw_lite;
 
+/* conf is netcast.conf (NETCAST_CONF, from run-app.sh): our keys live in its [settings] section.
+ * Without NETCAST_CONF it is the old standalone $HOME/settings.conf (no sections). */
+static int sectioned;
+
+static int is_header(const char *l, const char **name, int *len) {
+    while (*l == ' ' || *l == '\t') l++;
+    if (*l != '[') return 0;
+    const char *e = strchr(l, ']');
+    if (!e) return 0;
+    *name = l + 1; *len = (int)(e - l - 1);
+    return 1;
+}
+static int is_settings(const char *l) {
+    const char *n; int len;
+    return is_header(l, &n, &len) && len == 8 && strncasecmp(n, "settings", 8) == 0;
+}
+static int our_key(const char *l) {
+    while (*l == ' ' || *l == '\t') l++;
+    return !strncmp(l, "SAVER_MIN", 9) || !strncmp(l, "NOSLEEP", 7) || !strncmp(l, "LITE", 4);
+}
+
 static void load_conf(void) {
     FILE *f = fopen(conf, "r");
-    char line[128];
+    char line[1024];
+    int on = !sectioned;
     while (f && fgets(line, sizeof line, f)) {
-        sscanf(line, "SAVER_MIN=%d", &saver_min);
-        sscanf(line, "NOSLEEP=%d", &nosleep);
-        sscanf(line, "LITE=%d", &lite);
+        const char *n; int len;
+        if (sectioned && is_header(line, &n, &len)) { on = is_settings(line); continue; }
+        if (!on) continue;
+        const char *l = line;
+        while (*l == ' ' || *l == '\t') l++;
+        sscanf(l, "SAVER_MIN = %d", &saver_min);
+        sscanf(l, "NOSLEEP = %d", &nosleep);
+        sscanf(l, "LITE = %d", &lite);
     }
     if (f) fclose(f);
 }
 
 static void save_conf(void) {
-    FILE *f = fopen(conf, "w");
-    if (!f) return;
-    fprintf(f, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n", saver_min, nosleep, lite);
-    fclose(f);
+    if (!sectioned) {
+        FILE *f = fopen(conf, "w");
+        if (!f) return;
+        fprintf(f, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n", saver_min, nosleep, lite);
+        fclose(f);
+        return;
+    }
+    /* rewrite netcast.conf: keep everything, replace our keys inside [settings] */
+    char tmp[600], line[1024];
+    snprintf(tmp, sizeof tmp, "%s.tmp", conf);
+    FILE *in = fopen(conf, "r"), *out = fopen(tmp, "w");
+    if (!out) { if (in) fclose(in); return; }
+    int on = 0, done = 0;
+    while (in && fgets(line, sizeof line, in)) {
+        const char *n; int len;
+        if (is_header(line, &n, &len)) {
+            if (on && !done) { fprintf(out, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n\n", saver_min, nosleep, lite); done = 1; }
+            on = is_settings(line);
+        } else if (on && our_key(line)) continue;
+        fputs(line, out);
+    }
+    if (!done) {
+        if (!on) fputs("\n[settings]\n", out);
+        fprintf(out, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n", saver_min, nosleep, lite);
+    }
+    if (in) fclose(in);
+    if (fclose(out) == 0) rename(tmp, conf); else remove(tmp);
 }
 
 static void set_status(const char *s) { lv_label_set_text(status_lbl, s); }
@@ -169,7 +220,10 @@ int main(int argc, char **argv) {
     snprintf(self, sizeof self, "%s", argv[0]);
     snprintf(base, sizeof base, "%s", dirname(self));
     snprintf(tools, sizeof tools, "%s/../../tools", base);
-    snprintf(conf, sizeof conf, "%s/settings.conf", getenv("HOME") ? getenv("HOME") : base);
+    const char *nc = getenv("NETCAST_CONF");
+    sectioned = nc && *nc;
+    if (sectioned) snprintf(conf, sizeof conf, "%s", nc);
+    else snprintf(conf, sizeof conf, "%s/settings.conf", getenv("HOME") ? getenv("HOME") : base);
     (void)argc;
     load_conf();
 

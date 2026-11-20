@@ -33,6 +33,7 @@ cp "$OUT/launcher" "$P/system/launcher"
 mkdir -p "$P/tools"
 cp "$OUT/ncscreen" "$OUT/ncnosleep" "$OUT/nclite" "$P/tools/"
 cp "$OUT/run-app.sh" "$P/apps/run-app.sh"
+cp "$TOP/src/apps/ncconf.sh" "$P/system/ncconf.sh"   # <stick>/netcast.conf: the one settings file
 
 # --- Doom ---
 mkdir -p "$P/apps/doom"
@@ -67,20 +68,18 @@ fi
 # --- Photos (HTTP photo viewer) ---
 mkdir -p "$P/apps/photos"
 cp "$OUT/photos" "$P/apps/photos/"
-cat > "$P/apps/photos/photos.conf" <<'EOT'
-# Photo server: any HTTP server with directory listings, e.g. on a PC:
-#     cd ~/Pictures && python3 -m http.server 8000
-# then set (use the PC's LAN address):
-url=http://192.168.1.10:8000/
-EOT
 cat > "$P/apps/photos/run.sh" <<'EOT'
 #!/bin/sh
-D=$(cd "$(dirname "$0")" && pwd)
-exec sh "$D/../run-app.sh" "$D/photos" "${1:-$D/photos.conf}"
+# Photos: settings come from the [photos] section of netcast.conf (next to the netcast/ folder)
+D=$(cd "$(dirname "$0")" && pwd); N=$(cd "$D/../.." && pwd)
+. "$N/system/ncconf.sh"; ncconf_init
+C=$1
+if [ -z "$C" ]; then C=/tmp/nc-photos.conf; ncconf_section photos > "$C"; fi
+exec sh "$D/../run-app.sh" "$D/photos" "$C"
 EOT
 cat > "$P/apps/photos/app.ini" <<'EOT'
 title=Photos
-desc=Photos from an HTTP server (edit apps/photos/photos.conf). OK slideshow, < > browse
+desc=Photos from an HTTP server ([photos] in netcast.conf). OK slideshow, < > browse
 exec=run.sh
 color=8a3ab0
 order=30
@@ -106,22 +105,18 @@ fi
 # --- Media player (hardware decoding via GStreamer 0.10 / mtkvideosink) ---
 mkdir -p "$P/apps/player"
 cp "$OUT/ncplay" "$P/apps/player/"
-cat > "$P/apps/player/streams.conf" <<'EOT'
-# One stream per line:  Name=URI
-#   file:///mnt/usb/usb2/Drive1/videos/movie.mkv
-#   http://192.168.1.10:8000/stream.ts      (HTTP progressive MP4/MKV/TS)
-#   rtsp://192.168.1.20:554/live            (IP cameras, RTSP servers)
-#   udp://239.0.0.1:1234                    (multicast MPEG-TS, e.g. from VLC/ffmpeg)
-# Hardware decoding: H.264, MPEG-2, MPEG-4 video; AAC (ADTS/TS), MP3, AC-3 audio.
-EOT
 cat > "$P/apps/player/run.sh" <<'EOT'
 #!/bin/sh
-D=$(cd "$(dirname "$0")" && pwd)
-exec sh "$D/../run-app.sh" "$D/ncplay" "${1:-$D/streams.conf}"
+# Media Player: streams come from the [player] section of netcast.conf (next to the netcast/ folder)
+D=$(cd "$(dirname "$0")" && pwd); N=$(cd "$D/../.." && pwd)
+. "$N/system/ncconf.sh"; ncconf_init
+C=$1
+if [ -z "$C" ]; then C=/tmp/nc-streams.conf; ncconf_section player > "$C"; fi
+exec sh "$D/../run-app.sh" "$D/ncplay" "$C"
 EOT
 cat > "$P/apps/player/app.ini" <<'EOT'
 title=Media Player
-desc=Hardware-decoded video: files, HTTP, RTSP, UDP multicast (edit apps/player/streams.conf)
+desc=Hardware-decoded video: files, HTTP, RTSP, UDP multicast ([player] in netcast.conf)
 exec=run.sh
 color=c0306a
 order=25
@@ -157,20 +152,13 @@ printf 'dr_flac / dr_mp3 / dr_wav (mackron/dr_libs @ %s): public domain (Unlicen
 # --- Network Shares (SMB2/3 via libsmb2) + gateway for the other apps ---
 mkdir -p "$P/apps/smb"
 cp "$OUT/ncsmb" "$OUT/smbgw" "$P/apps/smb/"
-[ -f "$P/apps/smb/shares.conf" ] || cat > "$P/apps/smb/shares.conf" <<'EOT'
-# Network Shares: one server or share per line.
-#   Name = smb://[DOMAIN;]user[:password]@host[:port]/[share[/folder]]
-# Leave out the share to list all shares of a server. No user = guest.
-# Escape special characters in the password: @ -> %40, : -> %3A, space -> %20, % -> %25
-# SMB2/3 servers only (Windows 7+, Samba 3.6+, any current NAS).
-#
-# Examples:
-#   NAS music  = smb://me:secret@192.168.1.20/music
-#   Windows PC = smb://me:secret@192.168.1.30/
-EOT
 cat > "$P/apps/smb/run.sh" <<'EOT'
 #!/bin/sh
-D=$(cd "$(dirname "$0")" && pwd)
+# Network Shares: servers come from the [shares] section of netcast.conf (next to the netcast/ folder)
+D=$(cd "$(dirname "$0")" && pwd); N=$(cd "$D/../.." && pwd)
+. "$N/system/ncconf.sh"; ncconf_init
+ncconf_section shares > /tmp/nc-shares.conf
+export NC_SHARES_CONF=/tmp/nc-shares.conf
 exec sh "$D/../run-app.sh" "$D/ncsmb" "$@"
 EOT
 cat > "$P/apps/smb/app.ini" <<'EOT'
@@ -190,7 +178,7 @@ cp "$TOP/third_party/libvterm-0.3.3/LICENSE" "$P/LICENSES/libvterm-MIT.txt"
 
 # --- Remote Desktop (FreeRDP 3, SDL2 client) ---
 mkdir -p "$P/apps/rdp"
-cp "$OUT/rdp/sdl-freerdp" "$PKG/rdp/run.sh" "$PKG/rdp/app.ini" "$PKG/rdp/rdp.conf" "$P/apps/rdp/"
+cp "$OUT/rdp/sdl-freerdp" "$PKG/rdp/run.sh" "$PKG/rdp/app.ini" "$P/apps/rdp/"
 cp "$TOP/third_party/FreeRDP-3.33.1/LICENSE" "$P/LICENSES/FreeRDP-Apache-2.0.txt"
 cp "$TOP/third_party/SDL2_ttf-2.24.0/LICENSE.txt" "$P/LICENSES/SDL2_ttf-zlib.txt"
 
@@ -207,10 +195,12 @@ source tree, so the app can be rebuilt and relinked against a modified Qt.
 NOTE
 fi
 
-# --- Kernel modules for the stock 3.0.13 kernel (never loaded automatically) ---
-if [ "$RELEASE" = 0 ] && [ -f "$TOP/src/kmod/xpad.ko" ]; then   # third_party/build-deps.sh kmod
+# --- Kernel modules for the stock 3.0.13 kernel (start.sh loads xpadone.ko on the verified kernel only) ---
+# xpad.ko is not shipped: the TV has xpad built in, and our build writes input_dev fields at vanilla
+# offsets that are wrong for LG's kernel (see FINDINGS.md). xpadone.ko adds Xbox One/Series pads.
+if [ "$RELEASE" = 0 ] && [ -f "$TOP/src/kmod/xpadone.ko" ]; then   # third_party/build-deps.sh kmod
   mkdir -p "$P/tools/modules"
-  cp "$TOP/src/kmod/nchello.ko" "$TOP/src/kmod/xpad.ko" "$P/tools/modules/"
+  cp "$TOP/src/kmod/nchello.ko" "$TOP/src/kmod/xpadone.ko" "$P/tools/modules/"
 fi
 
 # --- Developer extras: static busybox, chroot userland (enter.sh / teardown.sh), debug tools ---
@@ -282,14 +272,31 @@ if [ "$1" != "--fg" ]; then
   echo "NetCast+ started (log: /tmp/netcast.log)"
   exit 0
 fi
-# Settings (written by the Settings app): SAVER_MIN, NOSLEEP, LITE
-SAVER_MIN=20; NOSLEEP=1; LITE=0
-[ -f "$N/home/settings.conf" ] && . "$N/home/settings.conf"
+# All settings, servers and URLs: <stick>/netcast.conf, next to this folder, so upgrades keep it.
+# Created on first start from the old per-app files (home/settings.conf, apps/*/…conf) if present.
+. "$N/system/ncconf.sh"
+ncconf_init
+# [settings] (the Settings app updates it): SAVER_MIN, NOSLEEP, LITE
+SAVER_MIN=$(ncconf_get settings SAVER_MIN); NOSLEEP=$(ncconf_get settings NOSLEEP); LITE=$(ncconf_get settings LITE)
+case "$SAVER_MIN" in ''|*[!0-9]*) SAVER_MIN=20;; esac
+case "$NOSLEEP" in 0|1) ;; *) NOSLEEP=1;; esac
+case "$LITE" in 0|1) ;; *) LITE=0;; esac
 # Keep the TV on (RAM-only: LG's Auto Off / No-signal / No-operation timers off until power cycle)
 [ "$NOSLEEP" = 1 ] && "$N/tools/ncnosleep" off
 # Our own screen saver: backlight off after N min without any input, any key brings it back
 if [ "${SAVER_MIN:-0}" -gt 0 ] && ! pidof ncscreen >/dev/null 2>&1; then
   nohup "$N/tools/ncscreen" saver "$SAVER_MIN" > /tmp/ncscreen-saver.log 2>&1 &
+fi
+# Xbox One/Series pads: the TV's built-in xpad predates them. Struct offsets were checked against this
+# exact LG kernel build only; on any other kernel, skip (a mismatch corrupts kernel memory).
+# RAM-only: insmod from the stick, nothing written to flash; gone after a power cycle.
+XPADONE_KERNEL='#1 SMP PREEMPT Sat May 20 20:58:12 KST 2017'
+if [ -f "$N/tools/modules/xpadone.ko" ] && [ ! -d /sys/bus/usb/drivers/xpadone ]; then
+  if [ "$(uname -r)" = 3.0.13 ] && [ "$(uname -v)" = "$XPADONE_KERNEL" ]; then
+    insmod "$N/tools/modules/xpadone.ko" && echo "xpadone: loaded" || echo "xpadone: insmod failed"
+  else
+    echo "xpadone: skipped, unverified kernel ($(uname -r) $(uname -v))"
+  fi
 fi
 # Lite mode: stop optional LG services
 [ "$LITE" = 1 ] && sh "$N/apps/run-app.sh" "$N/tools/nclite" stop > /tmp/nclite.log 2>&1
@@ -322,9 +329,13 @@ Install
 Use
   Arrows move, OK launches. "Exit to TV" returns to LG's home screen.
   Inside apps, the remote's BACK key is Escape ("back / menu"). Volume and Mute work in every app.
-  Photos: set url= in apps/photos/photos.conf to a server with directory listings
+  Gamepads: PS3 and wired Xbox 360 pads work out of the box. Wired Xbox One/Series pads need
+        tools/modules/xpadone.ko (developer builds), which start.sh loads on the kernel it was tested on.
+  Settings, servers and URLs: all in netcast.conf at the root of the USB stick, next to the
+        netcast/ folder (created on first start). Upgrades only replace netcast/, so it is kept.
+  Photos: set url= in the [photos] section of netcast.conf to a server with directory listings
         (e.g. "python3 -m http.server 8000" in your Pictures folder on a PC).
-  Network Shares: add servers to apps/smb/shares.conf (smb://user:password@host/share).
+  Network Shares: add servers to the [shares] section of netcast.conf (smb://user:password@host/share).
         OK on music opens Music, on photos opens Photos, on a video opens the Player;
         you come back to the same folder afterwards. RED plays all music in a folder.
   Music: FLAC/MP3/WAV from the stick or shares. OK play/pause, LEFT/RIGHT seek, CH+ next,

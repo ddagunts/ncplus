@@ -604,6 +604,7 @@ int main(int argc, char **argv) {
 
     nc_config cfg = {0};
     if (nc_init(&cfg) != 0) return 2;
+    nc_pad_keys(1);
     ncgfx_init();
     fbig = nctext_open(NULL, 40); fmed = nctext_open(NULL, 28); fsmall = nctext_open(NULL, 21);
     if (!fbig || !fmed || !fsmall) nc_exit(3);
@@ -618,7 +619,7 @@ int main(int argc, char **argv) {
     time_t slide_t = 0;
     float spin = 0;
 
-    if (!root[0]) snprintf(status_msg, sizeof status_msg, "No server configured: put url=http://HOST:PORT/ in photos.conf");
+    if (!root[0]) snprintf(status_msg, sizeof status_msg, "No server configured: put url=http://HOST:PORT/ in [photos] of netcast.conf");
     else load_dir(root);
 
     for (;;) {

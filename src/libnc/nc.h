@@ -69,6 +69,16 @@ EGLContext nc_egl_context(void);
 /* Look up any symbol in LG's libafopenapi.so (HOA_*), for experiments. Valid after nc_init(). */
 void *nc_hoa_sym(const char *name);
 
+/* 1 = gamepads (xpad/xpadone layout, PS3) also produce navigation keys: d-pad/left stick -> arrows
+ * (with auto-repeat), A/Start (PS3 Cross/Start) -> KEY_ENTER, B (Circle) -> KEY_ESC, LB/RB (L1/R1) ->
+ * KEY_PAGEUP/KEY_PAGEDOWN. Raw pad events are still delivered. Off by default (SDL apps use SDL joysticks). */
+void nc_pad_keys(int on);
+
+/* TV audio mute through LG's HOA_CTRL_GetMute/SetMute (valid after nc_init, also with no_window).
+ * nc_get_mute: 1 muted, 0 not, -1 unavailable. nc_set_mute: 0 ok, -1 failed. RAM-only. */
+int  nc_get_mute(void);
+int  nc_set_mute(int on);
+
 void nc_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 const char *nc_key_name(int code);            /* evdev key code -> "KEY_UP" etc. */
 

@@ -199,6 +199,106 @@ static void *lg_open(const char *n) {
     return h;
 }
 
+/* ---------------------------------------------------------- gamepads
+ * nc_pad_keys(1): gamepads also produce navigation keys, so key-driven menus work with a pad.
+ * Off by default: SDL apps read pads through SDL's joystick API and would otherwise get both. */
+enum { PAD_NONE, PAD_XPAD, PAD_PS3 };
+static struct {
+    int kind;
+    int amin[2], amax[2];   /* ABS_X / ABS_Y range */
+    int stick[2], hat[2];   /* current direction per source: -1, 0, 1 */
+} P[MAXDEV];
+static int pad_on;
+static int rep_code, rep_dev;   /* held synthesized key, for auto-repeat */
+static long long rep_next;
+#define PAD_REP_DELAY 400
+#define PAD_REP_RATE  120
+
+void nc_pad_keys(int on) { pad_on = on; }
+
+static long long now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static void pad_detect(int i, int fd) {
+    unsigned long keys[(KEY_MAX + 1) / (8 * sizeof(long)) + 1];
+    struct input_id id;
+    memset(&P[i], 0, sizeof P[i]);
+    memset(keys, 0, sizeof keys);
+    if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys) < 0) return;
+#define HAS(b) ((keys[(b) / (8 * sizeof(long))] >> ((b) % (8 * sizeof(long)))) & 1)
+    if (HAS(BTN_GAMEPAD)) P[i].kind = PAD_XPAD;   /* xpad / xpadone layout: BTN_A.. + hat */
+    else if (ioctl(fd, EVIOCGID, &id) == 0 && id.vendor == 0x054c && id.product == 0x0268)
+        P[i].kind = PAD_PS3;                     /* hid-sony on 3.0: generic buttons 0x120.. */
+#undef HAS
+    if (!P[i].kind) return;
+    for (int a = 0; a < 2; a++) {
+        struct input_absinfo ai;
+        if (ioctl(fd, EVIOCGABS(a ? ABS_Y : ABS_X), &ai) == 0 && ai.maximum > ai.minimum) {
+            P[i].amin[a] = ai.minimum; P[i].amax[a] = ai.maximum;
+        }
+    }
+    nc_log("libnc: gamepad on event%d (%s)", i, P[i].kind == PAD_PS3 ? "ps3" : "xpad");
+}
+
+static void pad_key(int i, int code, int value) {
+    nc_event e = {.type = NC_EV_KEY, .dev = i, .code = code, .value = value};
+    snprintf(e.name, sizeof e.name, "%s", S.devname[i]);
+    q_push(&e);
+    int repeats = code == KEY_UP || code == KEY_DOWN || code == KEY_LEFT || code == KEY_RIGHT ||
+                  code == KEY_PAGEUP || code == KEY_PAGEDOWN;   /* not OK/Back */
+    if (value == 1 && repeats) { rep_code = code; rep_dev = i; rep_next = now_ms() + PAD_REP_DELAY; }
+    else if (value == 0 && rep_code == code && rep_dev == i) rep_code = 0;
+}
+
+/* one direction source (stick or hat/d-pad) moved on axis a (0 = x, 1 = y) */
+static void pad_dir(int i, int a, int *cur, int dir) {
+    static const int k[2][2] = {{KEY_LEFT, KEY_RIGHT}, {KEY_UP, KEY_DOWN}};
+    if (dir == *cur) return;
+    if (*cur) pad_key(i, k[a][*cur > 0], 0);
+    *cur = dir;
+    if (dir) pad_key(i, k[a][dir > 0], 1);
+}
+
+static void pad_event(int i, int type, int code, int value) {
+    if (type == EV_ABS) {
+        if ((code == ABS_X || code == ABS_Y) && P[i].amax[code] > P[i].amin[code]) {
+            int a = code, c = (P[i].amin[a] + P[i].amax[a]) / 2, half = (P[i].amax[a] - P[i].amin[a]) / 2;
+            int pct = (int)((long long)(value - c) * 100 / half), dir = P[i].stick[a];
+            if (pct > 50) dir = 1; else if (pct < -50) dir = -1; else if (pct > -30 && pct < 30) dir = 0;
+            pad_dir(i, a, &P[i].stick[a], dir);
+        } else if (code == ABS_HAT0X || code == ABS_HAT0Y) {
+            pad_dir(i, code == ABS_HAT0Y, &P[i].hat[code == ABS_HAT0Y], value > 0 ? 1 : value < 0 ? -1 : 0);
+        }
+        return;
+    }
+    if (value == 2) return;   /* pads don't autorepeat; we do it ourselves */
+    int key = 0;
+    if (P[i].kind == PAD_XPAD) {
+        switch (code) {
+        case BTN_A: case BTN_START: key = KEY_ENTER; break;
+        case BTN_B: key = KEY_ESC; break;
+        case BTN_TL: key = KEY_PAGEUP; break;
+        case BTN_TR: key = KEY_PAGEDOWN; break;
+        }
+    } else {   /* PS3: 0x120 select, 0x123 start, 0x124-0x127 up/right/down/left, 0x12a L1, 0x12b R1,
+                  0x12c triangle, 0x12d circle, 0x12e cross, 0x12f square */
+        switch (code) {
+        case 0x124: pad_dir(i, 1, &P[i].hat[1], value ? -1 : 0); return;
+        case 0x126: pad_dir(i, 1, &P[i].hat[1], value ? 1 : 0); return;
+        case 0x127: pad_dir(i, 0, &P[i].hat[0], value ? -1 : 0); return;
+        case 0x125: pad_dir(i, 0, &P[i].hat[0], value ? 1 : 0); return;
+        case 0x12e: case 0x123: key = KEY_ENTER; break;
+        case 0x12d: key = KEY_ESC; break;
+        case 0x12a: key = KEY_PAGEUP; break;
+        case 0x12b: key = KEY_PAGEDOWN; break;
+        }
+    }
+    if (key) pad_key(i, key, value ? 1 : 0);
+}
+
 /* -------------------------------------------------------------- evdev */
 static void evdev_scan(void) {
     S.last_scan = time(0);
@@ -216,6 +316,7 @@ static void evdev_scan(void) {
         }
         S.devfd[i] = fd;
         snprintf(S.devname[i], sizeof S.devname[i], "%s", name);
+        pad_detect(i, fd);
         nc_event e = {.type = NC_EV_DEVICE_ADDED, .dev = i};
         snprintf(e.name, sizeof e.name, "%s", name);
         q_push(&e);
@@ -245,6 +346,17 @@ static int volume_api(void) {
     return vol_state > 0;
 }
 
+/* 1 = muted, 0 = not, -1 = API unavailable/failed. Needs nc_init (also with no_window). */
+int nc_get_mute(void) {
+    uint32_t m[4] = {0};
+    if (!volume_api() || !hoa_get_mute || hoa_get_mute(m) != 0) return -1;
+    return (m[0] & 0xff) != 0;
+}
+int nc_set_mute(int on) {
+    if (!volume_api() || !hoa_set_mute) return -1;
+    return hoa_set_mute(on ? 1 : 0, 1) == 0 ? 0 : -1;
+}
+
 static void volume_key(int code) {
     if (!volume_api()) return;
     if (code == KEY_MUTE) {
@@ -270,6 +382,8 @@ static void evdev_read(int i) {
             close(S.devfd[i]);
             S.devfd[i] = -1;
             q_push(&e);
+            if (rep_code && rep_dev == i) rep_code = 0;
+            P[i].kind = PAD_NONE;
             return;
         }
         for (int k = 0; k < (int)(n / sizeof *iev); k++) {
@@ -287,6 +401,8 @@ static void evdev_read(int i) {
             }
             snprintf(e.name, sizeof e.name, "%s", S.devname[i]);
             q_push(&e);
+            if (pad_on && P[i].kind && (iev[k].type == EV_KEY || iev[k].type == EV_ABS))
+                pad_event(i, iev[k].type, iev[k].code, iev[k].value);
         }
     }
 }
@@ -438,6 +554,18 @@ int nc_poll(nc_event *ev, int timeout_ms) {
     if (q_pop(ev)) return 1;
     if (S.quit) { memset(ev, 0, sizeof *ev); ev->type = NC_EV_QUIT; ev->dev = -1; return 1; }
     if (!S.cfg.no_evdev && time(0) - S.last_scan >= 2) evdev_scan();   /* hotplug (USB kbd/mouse) */
+
+    if (rep_code) {   /* held gamepad direction/button: auto-repeat */
+        long long left = rep_next - now_ms();
+        if (left <= 0) {
+            rep_next = now_ms() + PAD_REP_RATE;
+            memset(ev, 0, sizeof *ev);
+            ev->type = NC_EV_KEY; ev->dev = rep_dev; ev->code = rep_code; ev->value = 2;
+            snprintf(ev->name, sizeof ev->name, "%s", S.devname[rep_dev]);
+            return 1;
+        }
+        if (timeout_ms < 0 || left < timeout_ms) timeout_ms = (int)left;
+    }
 
     struct pollfd p[MAXDEV + 1];
     int map[MAXDEV + 1], n = 0;

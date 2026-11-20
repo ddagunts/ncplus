@@ -215,7 +215,7 @@ audio, Doom, Tyrian, Photos, RetroArch, the hardware video player, launcher, bac
 screen saver and keep-awake.
 
 Built, waiting for a test on the TV: Settings (LVGL), Terminal, Remote Desktop (FreeRDP), kernel
-modules (nchello, xpad). Qt 6 / QML is being cross-built.
+modules (nchello). Tested: `xpadone.ko` (Xbox One/Series wired pads). Qt 6 / QML is being cross-built.
 
 Next:
 - Load the first kernel module once its `struct module` layout is checked against LG's modules; then

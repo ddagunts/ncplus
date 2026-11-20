@@ -20,6 +20,8 @@ export PM_EXECPID=$(pidof procmgr) PM_SHELLPID=$$ PM_EXECPATH="$APP" PM_EXECARGS
 # LG's environment has HOME=/home, which is on the TV's flash: keep all app state on the USB stick.
 NCHOME="$(cd "$(dirname "$0")/.." && pwd)/home"
 mkdir -p "$NCHOME"
+# The one settings file, next to the netcast/ folder (see system/ncconf.sh)
+export NETCAST_CONF="${NETCAST_CONF:-$(cd "$(dirname "$0")/../.." && pwd)/netcast.conf}"
 export HOME="$NCHOME" XDG_DATA_HOME="$NCHOME/.local/share" XDG_CONFIG_HOME="$NCHOME/.config" XDG_CACHE_HOME="/tmp/ncapp-cache"
 # libafopenapi maps $APPFRWK_MASK_PATH (on flash) read-write/shared in every app: use a RAM copy.
 [ -f /tmp/appfrwk_mask ] || cp /mnt/lg/cmn_data/appfrwk_mask /tmp/appfrwk_mask 2>/dev/null

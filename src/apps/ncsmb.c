@@ -1,7 +1,7 @@
 /*
  * ncsmb: Network Shares, a file browser for SMB2/3 shares (libsmb2) and the USB stick.
  *
- * Shares are listed in shares.conf next to the binary:
+ * Shares come from the [shares] section of netcast.conf (run.sh passes it as $NC_SHARES_CONF; fallback: shares.conf next to the binary):
  *     Name = smb://[DOMAIN;]user[:password]@host[:port]/[share[/folder]]
  * An entry without a share lists the server's shares.
  *
@@ -439,7 +439,10 @@ int main(int argc, char **argv) {
     char *sl = strrchr(self, '/');
     if (sl) *sl = 0; else snprintf(self, sizeof self, ".");
     snprintf(netcast, sizeof netcast, "%s/../..", self);
-    snprintf(conf, sizeof conf, "%s/shares.conf", self);
+    /* run.sh extracts the [shares] section of netcast.conf; fall back to shares.conf next to the binary */
+    const char *sc = getenv("NC_SHARES_CONF");
+    if (sc && *sc) snprintf(conf, sizeof conf, "%s", sc);
+    else snprintf(conf, sizeof conf, "%s/shares.conf", self);
     snprintf(fontdir, sizeof fontdir, "%s/system/fonts", netcast);
     nshares = smb_load_conf(conf, shares, 64);
     load_state();

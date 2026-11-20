@@ -103,6 +103,7 @@ int main(int argc, char **argv) {
     load_apps(root);
     nc_config cfg = {0};
     if (nc_init(&cfg) != 0) return 2;
+    nc_pad_keys(1);
     ncgfx_init();
     nctext_font *ftitle = nctext_open(NULL, 56), *fname = nctext_open(NULL, 30), *fsmall = nctext_open(NULL, 24),
                 *fbig = nctext_open(NULL, 96);

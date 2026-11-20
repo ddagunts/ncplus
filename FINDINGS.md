@@ -7,7 +7,7 @@ Last updated: 2026-11-20. `telnet <TV IP>` gives a root BusyBox shell (no login)
 
 ## Ground rules
 
-- **Never write to the TV's internal eMMC** (believed to brick the TV). **Always upload to the TV through the temporary busybox ftpd** (`tools/push.sh`). Only the USB stick
+- **Never write to the TV's internal eMMC** (a modified system partition fails the boot-time signature check and hangs the TV; see "Flash, boot chain and secure boot"). **Always upload to the TV through the temporary busybox ftpd** (`tools/push.sh`). Only the USB stick
   (`/mnt/usb/usb2/Drive1`, vfat, exec allowed) and tmpfs `/tmp` (354 MB RAM) are used.
 - Indirect flash writers to avoid:
   - `gst-launch` (`GST_REGISTRY=/mnt/flash/data/gst_registry.arm.bin`)
@@ -240,7 +240,7 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
   (F-key menu shortcuts disabled).
 - `run-app.sh` sets **HOME/XDG to `netcast/home` on USB** (LG's HOME=/home is flash). Doom gets
   `-config/-extraconfig/-savedir` in its own folder.
-- Run: `sh /mnt/usb/usb2/Drive1/netcast/apps/doom/doom.sh`. (Correction 2026-11-20: Back does reach apps, as KEY_PREVIOUS 412; see Remote keys.)
+- Run: `sh /mnt/usb/usb2/Drive1/netcast/apps/doom/doom.sh`. Back is Escape (see Remote keys).
 
 ## NetCast+ package (launcher + apps)
 
@@ -251,7 +251,7 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
   Only one process owns the HOA window at a time.
 - `app.ini` keys: `title=`, `desc=`, `exec=`, `color=` (hex RGB), `order=`.
 - Still needed: autostart without telnet (needs a persistent hook = flash write, excluded); Magic Remote
-  pointer; gamepad; more apps.
+  pointer; more apps.
 
 ## More apps / screen control (2026-11-20)
 
@@ -259,7 +259,7 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
   SDL2. Data is `tyrian21.zip` from camanis.net (freeware release; the zip still contains the 1995 EULA).
   Bundled only with `build/package.sh --with-tyrian-data`. Preset `opentyrian.cfg`: fire=Return,
   change fire=F1, sidekicks=F2/F3, Scale2x, 4:3.
-- ~~The SDL driver maps CH- to Escape~~ (superseded 2026-11-20: Back = Escape, CH- = PageDown). Doom's cfg uses 27 for menu, back and abort.
+- Back is Escape and CH- is PageDown in the SDL driver. Doom's cfg uses 27 for menu, back and abort.
 - Screen off with Wi-Fi kept: there's no direct HOA setter (`HOA_CTRL_IsScreenoff` only). LG's
   *Picture -> Energy Saving -> Screen Off* does it. Candidates for a tool: `HOA_CTRL_SetPicControl` (enum values
   unknown; could change saved picture settings), and MTAL `MTPMX_PANEL_EnableLVDSPower` /
@@ -357,17 +357,26 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
 
 ## Kernel modules (2026-11-20)
 
-- LG's GPL tarball for this model wasn't found. Vanilla **linux-3.0.13** (kernel.org, sha256 checked) plus the Bootlin
-  armv7-eabihf 2018.11 toolchain (GCC 7.3; `compiler-gcc7.h` copied from gcc4) builds modules whose vermagic
-  matches exactly: `3.0.13 SMP preempt mod_unload ARMv7`.
-- Config: vexpress_defconfig plus SMP, PREEMPT, MODULE_UNLOAD, AEABI, VFP/NEON, **VMSPLIT_3G (PAGE_OFFSET 0xC0000000)**,
-  and no MODVERSIONS (the TV's modules have no `__crc_`). Build with `make -C src/kmod`
-  (`KCFLAGS=-fno-pie -fno-pic`).
-- Built: `nchello.ko` (log only) and `xpad.ko` (Xbox pads). Our `struct module`
-  (`.gnu.linkonce.this_module`) is 0x140 bytes, with init at +0xbc and exit at +0x138.
-- **Before any insmod:** pull one of LG's `.ko` (e.g. `/mnt/lg/res/lglib/tfat.ko`) and compare that size and those
-  offsets. LG's config may add fields to `struct module` (e.g. tracepoints, kmemleak), and a mismatch crashes the
-  kernel. If the layout matches, the first test is `insmod nchello.ko` then dmesg, from RAM only (`/tmp` or the stick).
+- **Build:** vanilla linux-3.0.13 (LG's GPL source for this model isn't available) with the Bootlin armv7-eabihf
+  2018.11 toolchain (GCC 7.3; `compiler-gcc7.h` copied from gcc4). Config: vexpress_defconfig plus SMP, PREEMPT,
+  MODULE_UNLOAD, AEABI, VFP/NEON, VMSPLIT_3G (PAGE_OFFSET 0xC0000000), no MODVERSIONS (LG's modules have no
+  `__crc_`). vermagic matches: `3.0.13 SMP preempt mod_unload ARMv7`. `make -C src/kmod` (`KCFLAGS=-fno-pie -fno-pic`).
+- **`struct module` matches** LG's (`tools/kmod-check.sh` against `tfat.ko`: 0x140 bytes, init +0xbc, exit +0x138).
+  `nchello.ko` loads and unloads cleanly from `/tmp`.
+- **LG's `struct input_dev` is 136 bytes larger** between `keybit` and `open`: `open`/`close` at 500/504 and `dev`
+  at 560 (vanilla: 364/368/424). `name`, `phys`, `id`, `evbit`, `keybit`, `struct urb` and `usb_device` up to
+  `descriptor` match. Modules must not touch `input_dev` fields past `keybit`. Found by disassembling LG's
+  built-in `xpad_probe`, read from `/dev/mem` (phys = virt − 0xc0000000). The `struct module` check does not catch this.
+- **Built into LG's kernel:** xpad (original Xbox and Xbox 360 pads, rumble; no Xbox One), usbhid, hid-sony.
+  A PS3 pad (`054c:0268`) works as is. More 360-protocol pads: `echo VID PID > /sys/bus/usb/drivers/xpad/new_id`.
+- **`xpadone.ko`** (`src/kmod/xpadone.c`): Xbox One/Series wired pads (GIP, interface `ff/47/d0`), touching only
+  the matching fields. These pads also have device class `0xff`, so the ID table matches vendor + interface
+  (on 3.0 a bare `USB_INTERFACE_INFO` never matches); other vendors:
+  `echo VID PID ff > /sys/bus/usb/drivers/xpadone/new_id`. Tested with a PowerA `20d6:2001`: all buttons, sticks
+  (±32768), triggers (0–1023), d-pad (hat), rmmod/insmod. Guide hasn't been seen yet. `start.sh` loads it only on
+  the kernel build it was checked against.
+- `src/kmod/xpad.c` (vanilla xpad) is not shipped: it duplicates the built-in driver and writes `input_dev` at
+  vanilla offsets.
 
 ## Qt 6 / QML (in progress, 2026-11-20)
 
@@ -426,14 +435,14 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
 - Input devices: event0 "LGE KEY RETURNPATH", event1 "LGE CURSOR RETURNPATH", event2 "LGE RCU", event3 "LGE NLP",
   event4 "Smart Remote RCU Input", event5 "LGE Smart Remote - TouchPad", event6 "LG Magic gamepad".
 - Captured with `src/tools/evdump.c` (read-only). All on event2: **Back = 412 (KEY_PREVIOUS)**, Vol+ 115,
-  Vol- 114, Mute 113, OK 28. The earlier "Back never reaches apps" was wrong: it was just unmapped.
+  Vol- 114, Mute 113, OK 28.
 - libnc maps 412 to KEY_ESC for every app. The SDL driver maps Escape, so Back is back/menu everywhere, and CH-
   is now PageDown. Photos and Player no longer treat CH- as back; the terminal keeps CH- = Ctrl-C.
 - **Volume:** while our app has focus, LG doesn't act on volume keys. libnc calls LG's API from libbcopenapi
   (loaded lazily), with the calling convention taken from RELEASE's own caller `UI_GESTURE_CtrlSetVoluem`:
   `HOA_CTRL_SetVolume(0 /*relative*/, 2 /*type*/, 1, ±1, &newvol)`. The RS-232 handler uses
   `(1 /*absolute*/, 2, 0, level, NULL)`. `HOA_CTRL_GetCurrentVolume(2, &u8)`. Mute is
-  `HOA_CTRL_GetMute(&m)` + `HOA_CTRL_SetMute(!m, 1)`; that second argument is a guess. LG persists the level
+  `HOA_CTRL_GetMute(&m)` + `HOA_CTRL_SetMute(!m, 1)`. LG persists the level
   itself, as for any volume change. `NC_NO_VOLUME=1` disables this. Not yet tested on the TV.
   Qt apps (`no_evdev`) don't get this yet.
 - RELEASE's key-name table at file offset ~0xdd6c14 is `{const char *name, uint32 linux_code}` pairs
@@ -441,180 +450,112 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
 - `HOA_PROC_UnregisterKeysFromAppKeyTable(const uint32_t *keys, uint32_t n)` exists (it would hand keys back
   to LG). The key code space it uses is unknown, so it isn't used.
 
-## Flash layout and secure boot (2026-11-20)
+## Flash, boot chain and secure boot (2026-11-20)
 
-Dumped read-only to `tv_dump/flashdump/` (via BusyBox `dd` from flash to the USB stick, then BusyBox
-`httpd` on the TV + `curl` from the host; nothing written to flash). `tools/tv-dump-flash.sh` reproduces it.
+Dumped read-only to `tv_dump/flashdump/` with `tools/tv-dump-flash.sh` (BusyBox `dd` to the USB stick, served by
+BusyBox `httpd`, md5-verified): p1 boot, p2/p3 PART.INFO, p4 swue, p6/p7, p8 U-Boot env, p13 key/DRM blob,
+p16 rootfs, p17 lginit, p18 model, p20 LZ blob, p21/p22 kernel, p28 DRM ELF. U-Boot was analysed by LZHS-decoding
+p1 at `0x80000` (port of openlgtv `epk2extract`) and disassembling at VMA `0x800000`.
 
-**Storage: eMMC only, no NAND/MTD.** `/dev/mmcblk0` ~3.8 GB, GPT-ish with 63 partitions plus
-`mmcblk0boot0/1` HW-boot areas (no /dev nodes). `/proc/mtd` is empty. The partition map and names come
-from `p2` (`PART.INFO`): mtk3598-emmc, boot(.bin), partinfo, mapbak, swue, env_nvm, widevine, idfile,
-cert, authcxt, nvram, marlin, hdcp, rootfs, lginit, model, cfginfo, logo, kernel(uImage), lgapp(.lz4),
-lgres, lglib, lgfont, opensrc, emanual, **tzfw(.bin)**, base, patch, skype, pqldb. There are **two banks**
-(A/B): many partitions mirror each other; the inactive copies read as `0xFF` (erased).
+**Summary: the boot chain RSA-verifies the system partitions on every boot. A modified rootfs, kernel, lginit or
+lgapp hangs the TV at boot and, in RELEASE mode, permanently burns the "full verify" eFuse. There is no A/B
+fallback. Nothing is ever written to flash; everything runs from the USB stick.**
 
-**The system is squashfs, read-only.** `cmdline: root=/dev/mmcblk0p16 rootfstype=squashfs ... bootdev=emmc`.
-rootfs and every LG system partition mount `squashfs ro`. The only writable areas are ext4:
-p62 (shared `cmn_data`/`home`/`cache`/`user`/`flash/data`), p61 `system_app`, p63 `appstore`, p15 hdcp,
-p12 ciplus, p31 vcs. (This is why the USB-overlay approach is the natural one.)
+### Storage
 
-**No verified/secure boot of the system images. Evidence:**
-- Preloader `p1` = MTK ROM/MSDC stub (`MTK/DTV/ROMCODE/MSDCBOOT/V01.00`): integrity is an **LZHS checksum**
-  only, and it prints **"not secure loader"** (eFuse secure-boot bit not blown on this unit).
-- u-boot env `p8` has **`verify=n`** (image CRC verification off), `autoboot=y`, `bootdelay=0`, `silent=y`.
-- Kernel mounts the raw squashfs directly: **no `dm-verity`**, no `verity=`/IMA in cmdline. `modules_disabled=0`
-  (consistent with our module work).
-- Partition integrity is **CRC32** (`p2` `CRC32.INFO`), and nothing in the boot path reads it: not `rcS`,
-  `checkroot.sh` (stock fsck), the `lginit` binary (no crc/verify/secure strings), nor anything in
-  `/sbin /bin /usr /mnt/nsu`. CRC32.INFO is OTA-updater (`swue`) metadata, checked during an update, not at boot.
-- TrustZone (`tzfw.bin`) and `cert` exist, but `p28` (a non-stripped ARM ELF object) is the **DRM** crypto
-  stack — libtomcrypt 1.16, ECDSA/ECC-P256/AES/SHA, path `dmx9880/drm/...` (Widevine/Marlin/HDCP/secure
-  storage), not rootfs/kernel authentication.
-- Kernel images `p21`/`p22` are MTK **"LZ4P"**-wrapped; `p20` is an LZHS/"LZ" blob (logo/loader). No signature
-  envelope around them.
+- eMMC only: `/dev/mmcblk0`, ~3.8 GB, 63 partitions (no NAND/MTD). System partitions are read-only squashfs
+  (`root=/dev/mmcblk0p16 rootfstype=squashfs`). No dm-verity or IMA; `modules_disabled=0`.
+- Writable ext4: p62 (`cmn_data`, `home`, `cache`, `user`, `flash/data`), p61 `system_app`, p63 `appstore`,
+  p15 hdcp, p12 ciplus, p31 vcs.
+- **PART.INFO** (p2, byte-identical backup `mapbak` = p3) maps logical names to physical extents. Header magic
+  `16 07 12 20`, device `mtk3598-emmc`. 96-byte records: `+0x00` name, `+0x20` physical offset and size,
+  `+0x30` filename, `+0x50` image size, `+0x54` version (`0x04031001` = v04.03.10), `+0x58` flags, `+0x5c` type.
+  A CRC over the first 0x3050 bytes is stored at `+0x3050`. Per-partition CRC32s are in `CRC32.INFO`.
+- **Banks:** updatable partitions (rootfs, kernel, lginit, swue, LG app/res) have two records. The active one
+  has flags bit0 set (`0x101`, inactive `0x100`). U-Boot uses the first active record per name to build
+  `root=`, `lginit=` etc. The inactive records hold the previous firmware, v04.03.09.
 
-> **CORRECTED 2026-11-20: the claim below is WRONG.** U-Boot RSA-verifies rootfs, lginit, kernel, lgapp,
-> vendor, opensrc, lglib and tzfw on every boot. A failed check hangs the TV and, in RELEASE mode, burns a
-> "full verify" eFuse. See "U-Boot boot flow and failure fallbacks" below. The evidence above missed it
-> because U-Boot is LZHS-compressed inside p1, so its strings never showed up.
+### p1 (`boot.bin`)
 
-**(Superseded) So: a modified (unsigned) rootfs/kernel would boot — the boot chain does not reject it.** The brick risk is
-**mechanical, not cryptographic**: (1) a squashfs partition is read-only and fixed-size, so persisting a change
-means rebuilding the squashfs and reflashing a whole partition with `dd` to `/dev/mmcblk0pN` — a real flash
-write; (2) a wrong-partition or interrupted/partial write to `p1`/`partinfo`/`tzfw`/env would brick it;
-(3) the OTA updater may react to a `CRC32.INFO` mismatch on the next update (rollback/forced reflash —
-usually recoverable, but unverified); (4) the A/B bank select logic isn't mapped yet. **Conclusion: persisting
-changes is technically possible (no secure boot blocks it), but every risk is in the write itself and the
-OTA/CRC layer — so we keep writing nothing to flash and stay on the USB overlay until the bank-select and
-updater CRC behaviour are understood from the dumps.**
+`0x0` MTK ROM preloader (MSDCBOOT, LZHS checksum, prints "not secure loader") · `0x9c00`/`0x9d00` header plus
+0x300 bytes of signature data · `0xa000` "X935" header, LZHS at `0xa040` → MT5398 **Lmain** loader (0x52800 bytes,
+Thumb, base `0xd00000`, DRAM init) · `0x33480` `mt5398_LGE_linux` tag · LZHS at `0x80000` → **U-Boot 1.3.4**
+(0x853e0 bytes, ARM, `TEXT_BASE=0x800000`, prompt `NC4_M13 # `, built Jan 29 2014).
+U-Boot env (p8): `autoboot=y`, `bootdelay=0`, `silent=y`, `verify=n`, `bootcmd=` (empty), no `watchdog=yes`.
+`verify=n` does not disable the signature checks below.
 
-Dumped partitions (host `tv_dump/flashdump/`, md5-verified against the TV): p1 bl, p2/p3 PART.INFO (identical),
-p6/p7, p8 u-boot env, p13 key/DRM blob, p16 rootfs, p17 lginit, p18 model, p20 LZ blob, p21/p22 kernel(LZ4P),
-p28 DRM ELF.
+### Image signatures
 
-## Bank-select and the swue updater (2026-11-20)
+Each image is the payload (4 KB-padded) plus a 0x1500-byte trailer of 21 RSA-2048 signatures. Signature k
+(0–19) covers 4 KB blocks k, k+20, k+40, …; signature 20 covers the whole image. SHA-1 + RSA public decrypt
+(`0x8235f4`). The modulus is read from SRAM `0xfb005120`, which Lmain copies from SRAM `0xf000`; it is not in
+p1 in plaintext.
 
-RE'd from `p2` (PART.INFO), `p4` (swue.squashfs, dumped & mounted read-only), and the SWUE binary
-(`tv_dump/flashdump/SWUE`, `SWUE.sym`, `SWUE.cfg`).
+### Boot sequence (`0x8006d0`)
 
-**PART.INFO (p2, with a byte-identical backup `mapbak` = p3) is a logical->physical partition map,
-96-byte records:**
-- `+0x00` name (e.g. `rootfs`), `+0x30` filename (`rootfs.squashfs`).
-- `+0x20`: **physical byte offset** and **size** on `/dev/mmcblk0` (u32 each). e.g. boot@0x0/1MB=p1,
-  partinfo@0x100000/256K=p2, swue@0x180000/32MB=p4.
-- `+0x40`: reserved, then at `+0x50` the **image size** (e.g. rootfs `0x89d500`; the squashfs reports `0x89b234` bytes used. Earlier notes wrongly called this field the CRC32), `+0x54` **version** (`0x04031001` = fw v04.03.10), `+0x58` **flags**, `+0x5c` **type**. Per-partition CRCs are kept only in `CRC32.INFO`.
-- Header: magic `16 07 12 20`, device `mtk3598-emmc`.
-
-**Bank select = the active-flag in PART.INFO, not a bootloader counter.** Updatable partitions have
-**two records** (A/B). The active copy has **flags bit0 = 1** (`0x101`); the inactive has `0x100`.
-e.g. `rootfs` active@0x37700000 (=p16, matches `root=/dev/mmcblk0p16`) vs inactive@0x5200000; same for
-`kernel`, `lginit`, `swue`, and the LG app/res partitions. The bootloader reads PART.INFO, picks the
-active record per logical name, and builds `root=` from its offset. CRC32 is stored
-in a dedicated `CRC32.INFO` partition; `CFG.INFO`, `env_nvm`, `macadr` are separate.
-
-**swue (Software Update Engine):** a separate 32 MB partition (p4), mounted only during an update
-(normally `/mnt/swue` is empty; no swue process at boot). Key functions (from `SWUE.sym`):
-`API_SWU_GetAvailPartIndex/CRC32`, `API_SWU_GetCurUsedPartIndex/CRC32`, `API_SWU_SetCRC32`,
-`API_SWU_VerifyImage`, `## Boot Swap ##` / `Boot Swap Okay.`, `API_DDM_POWER_Shutdown_ByVerifyFail`,
-`gCurEpkVer`/`gOldEpkVer`. Update flow:
-1. Read an **EPK** package (`Decrypt signed & encrypted EPK`) — OTA images are **RSA-signed and
-   AES-encrypted** (swue bundles `libcrypto.so.1.0.0` + `netflix_pub.pem`), so a valid EPK can't be forged.
-2. Write images to the **available (inactive)** bank.
-3. `API_SWU_VerifyImage`: CRC32 the freshly-written images; on mismatch it does **not** swap and can
-   power off (`Shutdown_ByVerifyFail`).
-4. `SetCRC32` into PART.INFO, update EPK version, then **Boot Swap** = flip the active-flag in PART.INFO
-   and mapbak; reboot into the new bank.
-
-**Implications for the brick question (updated):**
-- CRC32 is an **update-time** integrity check, *under* the EPK signature. It is **never checked at boot**
-  (swue doesn't run at boot; u-boot `verify=n`; no dm-verity; no boot script reads CRC32.INFO).
-- So a locally-modified active partition **boots fine**; its PART.INFO CRC32 just goes stale and nothing
-  cares. The stale CRC could matter only to a future OTA (`GetCurUsedPartCRC32`), but OTA needs a signed
-  EPK over the internet this TV can't reach, so it's not a practical local-modding hazard.
-- The "proper" persistent path mirrors swue: write the **inactive** bank, update its CRC32+active-flag in
-  **both** PART.INFO (p2) and mapbak (p3), swap, reboot. Doing it by hand is the risky flash-write path;
-  corrupting PART.INFO loses the logical->physical map (mapbak is the only backup).
-- Net: still no secure-boot barrier to local mods; the brick risk stays mechanical (writing
-  PART.INFO/bootloader/wrong offset, interrupted write) — so the no-flash-write rule holds.
-  **(Superseded: there IS a boot-time signature barrier. See the next section.)**
-
-## U-Boot boot flow and failure fallbacks (2026-11-20)
-
-Work is in the session scratchpad: a Python LZHS decoder (port of openlgtv `epk2extract`), the decompressed
-images and the disassembly. To redo it, LZHS-decode p1 at `0x80000` and disassemble at VMA `0x800000`.
-
-**p1 (`boot.bin`) layout:** `0x0` MTK ROM preloader (MSDCBOOT, "not secure loader") · `0x9c00`/`0x9d00`
-header plus 0x300 bytes of signature-like data · `0xa000` "X935" header, then LZHS at `0xa040` → **MT5398
-"Lmain" loader** (0x52800 bytes, Thumb, base `0xd00000`, DRAM init) · `0x33480` "LGE"/`mt5398_LGE_linux`
-tag · LZHS at `0x80000` → **U-Boot 1.3.4** (0x853e0 bytes, ARM, `TEXT_BASE=0x800000`, prompt
-`NC4_M13 # `, built Jan 29 2014).
-
-**Partition images are signed.** Each image = squashfs (4K-padded) + a **0x1500-byte trailer of 21 × 256-byte
-RSA-2048 signatures** (checked on rootfs and lginit: high-entropy blocks follow the squashfs). Signatures
-0–19 are "partial": signature k covers 4 KB blocks k, k+20, k+40, … Signature 20 covers the whole image.
-The scheme is SHA-1 + RSA public decrypt (`0x8235f4`). The modulus is read from SRAM `0xfb005120`, a 4 KB
-block that Lmain copies from SRAM `0xf000` (put there by an earlier boot stage; it is not stored in plaintext in p1).
-
-**Boot sequence (`0x8006d0`, called from board init at `0x800dd8`):**
-1. "fast boot check": unless the debug level is RELEASE, a 200 ms window where a backtick (`0x60`) on the
-   UART drops to the U-Boot console.
-2. Work out the boot state (`0x81bc64`): 0 = normal, 1 = cold boot that will make a snapshot, 2 = resume a
-   snapshot (`lgsnap` on the cmdline; image in the 64 MB `hib` partition).
-3. **`verify_apps(mode)` (`0x8239dc`)** walks a fixed table: lginit, rootfs, tzfw (both modes); vendor,
-   opensrc, lglib (normal mode); patch, emanual, estreamer, extra and base only when full verify is on;
-   swue only in SWU mode. With the OTP bit `0xf0008664` bit0 ("full verify") clear, it checks **one
-   partial signature per partition, picked pseudo-randomly each boot** (`[0xf0008074] % 20`). Over many
-   boots every block gets checked.
-4. If SWU mode is set (I²C EEPROM: magic `0x20121205` at NVM `0x198` and byte `0x18b == 'S'`), it runs
-   `cp2ram swue 0x04000000;verification 0 swue 0x04000000;` + the kernel command. That boots the update
-   engine, which resumes an interrupted update.
+1. Fast-boot check: except in RELEASE, a 200 ms window in which a backtick on the UART opens the U-Boot console.
+2. Boot state (`0x81bc64`): normal, cold boot that makes a snapshot, or snapshot resume (`lgsnap`, 64 MB `hib`).
+3. `verify_apps` (`0x8239dc`): lginit, rootfs, tzfw always; vendor, opensrc, lglib in normal mode; patch,
+   emanual, estreamer, extra, base only with full verify; swue in SWU mode. Without full verify (OTP
+   `0xf0008664` bit0) it checks one partial signature per partition, chosen per boot (`[0xf0008074] % 20`).
+4. SWU mode (EEPROM: `0x20121205` at NVM `0x198` and `'S'` at `0x18b`): `cp2ram swue 0x04000000;verification 0 swue
+   0x04000000;` + kernel, which boots the update engine to resume an update.
 5. Otherwise: `cp2ramz lz4 kernel 0x7000000 0x7FC0;verification 0 kernel 0x7000000;xiplz4 lgapp;bootm 0x7FC0`.
-   bootargs are built from the **active** PART.INFO records (`root=/dev/mmcblk0p%d`, `lginit=`, …).
-
-**What happens on each failure (the fallback question):**
 
 | Failure | Behaviour |
 |---|---|
-| PART.INFO CRC bad (CRC over 0x3050 bytes, stored at +0x3050) | Copies **mapbak (p3) over partinfo (p2)** and carries on. This is a flash write by U-Boot itself. mapbak's own CRC isn't checked first. |
-| Signature mismatch (rootfs/lginit/kernel/lgapp/tzfw/…) | Prints `signature check fail!`. In **RELEASE** it then **burns the full-verify eFuse** (`0x823394`, permanent) and **spins forever** (`b .` at `0x8236b4`). No reset, no bank fallback. |
-| RSA decrypt error (bad padding) | Returns -2 and boot **continues**. This looks like an oddity, not a usable bypass. |
-| Snapshot image bad | RELEASE: erases `hib`, then `reset` → cold boot (a real fallback). DEBUG: hangs. |
-| Kernel load or bootm fails | The boot function returns, then `main_loop`. The saved env has **`bootcmd=` (empty)**, `bootdelay=0` and no `watchdog=yes`, so it **sits at the `NC4_M13 #` UART prompt**. The HW watchdog (`0xf0028100`) is only armed if `watchdog=yes`. |
-| Kernel panic or init dies | cmdline has **`panic=1`**, so it reboots after 1 s into the **same** bank: an endless boot loop. No Linux watchdog device. |
-| Interrupted OTA | The SWU flag is still set in the EEPROM, so the next boot re-enters swue and the update resumes. |
+| PART.INFO CRC bad | U-Boot copies mapbak (p3) over p2 and continues (mapbak's CRC is not checked first). |
+| Signature mismatch | `signature check fail!`; in RELEASE burns the full-verify eFuse (`0x823394`) and spins forever (`0x8236b4`). No reset, no bank fallback. |
+| RSA decrypt error (bad padding) | Returns -2; boot continues. |
+| Snapshot image bad | RELEASE: erases `hib` and resets into a cold boot. DEBUG: hangs. |
+| Kernel load or `bootm` fails | Falls to `main_loop` with an empty `bootcmd`: sits at the `NC4_M13 #` prompt. The HW watchdog (`0xf0028100`) is armed only with `watchdog=yes`. |
+| Kernel panic or init dies | `panic=1`: reboots after 1 s into the same bank, i.e. a boot loop. No Linux watchdog device. |
+| Interrupted update | The SWU flag stays set, so the next boot resumes the update in swue. |
 
-**There is no automatic A/B fallback.** The name→record lookup (`0x815448`) returns the first record whose name
-matches and whose active byte (+0x58) is set. Nothing counts failed boots, and nothing retries the inactive
-copy. Only swue flips banks ("Boot Swap"), after a successful update. The inactive records do still describe
-a **previous firmware v04.03.09** for rootfs, kernel, lgapp, opensrc, base and vendor (non-zero image sizes, older
-versions), so the old bank may still be intact. Even so, switching to it means editing PART.INFO and mapbak by hand.
+Nothing counts failed boots or tries the inactive bank; only swue switches banks.
 
-**Recovery paths that exist (all need the UART console, which RELEASE mode locks out via the fast-boot
-check):** `swum` (EPK from FAT32 USB), `swu` (EPK over TFTP), `loadm`/`load` (raw image to a partition),
-`usbboot`, `partinfo` (edit the map), `setboot`, `swumode on`. SWUE also has a USB EPK path
-(`USBUPDATE`, `MSG_SWU2UI_USB_UPDATE_*`), but EPKs are signed. SWUE shares the eFuse policy: "verify
-failed in 2nd check ... OTP will be set and System will be shutdown".
+### Updates (swue, p4)
 
-**Implications:** reflashing a modified rootfs/kernel/lginit/lgapp **will brick the TV** (hang at boot) and
-may permanently turn on full verification. Only partitions outside the verify table (e.g. `lgres`, `lgfont`,
-`model`, `logo`, `cfginfo`, `pqldb`, `skype`, `tplist`, `preload`, `vocdb`) and the ext4 data partitions are
-not signature-checked at boot. The no-flash-write rule is now a hard rule.
-**Debug level (2026-11-20): this unit is RELEASE (2).** NVM byte `0x18a` (0 DEBUG / 1 EVENT / 2 RELEASE) lives in an
-I²C EEPROM (LG NVM handle ch 3 / dev 0xA8 → MTK SIF bus 0, clkdiv 380, 2-byte big-endian subaddress), not on the
-eMMC. U-Boot ignores it if the valid mark at `0x14` is `ff ff ff ff`, and treats a value > 2 as RELEASE. Only the
-LG debug-status setters (plus the factory "clear NVM" debug commands) write it. SIF ioctl struct is
-`{bus, clkdiv, dev, u8 *subaddr, subaddr_len, buf*, count, pad}` (field 3 is a pointer; `ncscreen.c`'s comment has
-it the other way round, which is harmless there because it passes 0/0). Tool: `src/tools/ncdebug.c`
-(`status`, `dump`, `set <level> [--yes]`, `toggle [--yes]`; dry run without `--yes`; addressing self-test,
-one-byte write plus read-back verification). The level takes effect at the next cold boot.
-DEBUG/EVENT: UART break-in, no full-verify eFuse burn on a signature failure, but a bad snapshot is not auto-cleared.
-**Still unknown:** whether the full-verify OTP is already set (`0xf0008664` bit0, readable with `devmem`), and whether the MICOM
-power-cycles a hung SoC.
+Mounted only during an update. EPK packages are **RSA-signed and AES-encrypted** (swue bundles
+`libcrypto.so.1.0.0` and `netflix_pub.pem`). Flow: decrypt and verify the EPK → write the images to the inactive
+bank → `API_SWU_VerifyImage` CRC32-checks them (on mismatch: no swap, `API_DDM_POWER_Shutdown_ByVerifyFail`) →
+`API_SWU_SetCRC32` and version update → "Boot Swap" flips the active flags in PART.INFO and mapbak → reboot.
+`CRC32.INFO` is used only here. A failed second verify also sets the OTP ("OTP will be set and System will be
+shutdown").
+
+### Other crypto
+
+p28 is the DRM stack (unstripped ARM ELF: libtomcrypt 1.16, ECDSA P-256, AES, SHA; Widevine, Marlin, HDCP,
+secure storage). `tzfw` is TrustZone firmware. Kernel images p21/p22 are MTK "LZ4P"-wrapped; p20 is an LZHS blob.
+
+### Recovery
+
+Only from the UART console, which RELEASE locks out: `swum` (EPK from FAT32 USB), `swu` (EPK over TFTP),
+`loadm`/`load` (raw image to a partition), `usbboot`, `partinfo`, `setboot`, `swumode on`. SWUE's USB update path
+accepts signed EPKs only.
+
+### What is not signature-checked at boot
+
+lgres, lgfont, model, logo, cfginfo, pqldb, skype, tplist, preload, vocdb, and the ext4 data partitions.
+
+### Debug level
+
+This unit is **RELEASE (2)**. NVM byte `0x18a` (0 DEBUG, 1 EVENT, 2 RELEASE) is in an I²C EEPROM (LG NVM handle
+ch 3 / dev 0xA8 → MTK SIF bus 0, clkdiv 380, 2-byte big-endian subaddress), not on the eMMC. U-Boot ignores it
+when the valid mark at `0x14` is `ff ff ff ff` and treats values > 2 as RELEASE. DEBUG/EVENT allow UART break-in
+and skip the eFuse burn on a signature failure, but don't auto-clear a bad snapshot. The level takes effect at the
+next cold boot. SIF ioctl struct: `{bus, clkdiv, dev, u8 *subaddr, subaddr_len, u8 *buf, count, pad}`.
+Tool: `src/tools/ncdebug.c` (`status`, `dump`, `set <level> [--yes]`, `toggle [--yes]`; dry run without `--yes`;
+addressing self-test; one-byte write with read-back).
+
+Open: whether the full-verify OTP is already set (`0xf0008664` bit0, readable with `devmem`), and whether the
+MICOM power-cycles a hung SoC.
 
 ## Next steps
 
 - On the TV: test Settings, Terminal, Remote Desktop and QML; confirm the media player and RetroArch visually; live-test nclite.
-- Kernel modules: compare `struct module` against an LG .ko, then insmod nchello, then xpad (gamepads), tun, cifs.
+- Kernel modules: tun, cifs (check `input_dev`-style struct offsets against LG's code first, as for xpadone).
+- Mute while the screen saver is dark (no extra procmgr registrations: those can't be unregistered).
 - Investigate the intermittent audio-init segfault; Wi-Fi stalls after large uploads (try Ethernet).
 - Magic Remote pointer; ScummVM; a file browser.
 - Newer kernel: research only (no kexec; LG's display/GPU/Wi-Fi drivers are binary modules for 3.0.13).
@@ -631,7 +572,7 @@ power-cycles a hung SoC.
 | `usb/netcast/` | files deployed to the USB stick (image, BusyBox, `enter.sh`, `teardown.sh`, MD5SUMS) |
 | `toolchain/` | buildroot-nc4 SDK |
 | `tools/` | `tv.py`, `pull.sh`, `push.sh`, `netwatch.sh` |
-| `src/kmod/` | out-of-tree kernel modules (nchello, xpad) for the stock 3.0.13 kernel |
+| `src/kmod/` | out-of-tree kernel modules (nchello, xpadone) for the stock 3.0.13 kernel |
 | `src/qml/hello/` | QML Hello World (static Qt 6) |
 | `third_party/kernel/` | linux-3.0.13 (configured for vermagic) + Bootlin GCC 7.3 toolchain |
 | `third_party/qt/` | Qt 6.12 sources, `build-host.sh`, `build-target.sh`, eglfs_netcast plugin (in the qtbase tree) |
