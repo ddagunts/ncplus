@@ -26,6 +26,9 @@ export HOME="$NCHOME" XDG_DATA_HOME="$NCHOME/.local/share" XDG_CONFIG_HOME="$NCH
 # libafopenapi maps $APPFRWK_MASK_PATH (on flash) read-write/shared in every app: use a RAM copy.
 [ -f /tmp/appfrwk_mask ] || cp /mnt/lg/cmn_data/appfrwk_mask /tmp/appfrwk_mask 2>/dev/null
 export APPFRWK_MASK_PATH=/tmp/appfrwk_mask
+# SDL gamepads: hide LG's virtual input devices (LGE CURSOR RETURNPATH, LG Magic gamepad; both 0001:0001),
+# which SDL would otherwise report as game controllers ahead of a real pad.
+export SDL_GAMECONTROLLER_IGNORE_DEVICES=0x0001/0x0001
 # GStreamer (SDL audio) would rewrite its plugin registry on flash: use a RAM copy instead.
 [ -f /tmp/ncapp-gstreg.bin ] || cp /mnt/flash/data/gst_registry.arm.bin /tmp/ncapp-gstreg.bin 2>/dev/null
 export GST_REGISTRY=/tmp/ncapp-gstreg.bin GST_REGISTRY_UPDATE=no
