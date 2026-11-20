@@ -1,0 +1,98 @@
+# ============================================================================
+# NetCast+ .gitignore
+# Never commit: device-specific secrets, proprietary LG firmware, personal
+# recordings, large third-party downloads, or regenerable build output.
+# ============================================================================
+
+# --- Device dumps & proprietary LG firmware (NEVER COMMIT) ---------------------
+# Per-device secrets (DRM key blobs, HDCP/Widevine/Marlin material, device
+# certificate, MAC/serial) and LG-copyrighted binaries/disassembly.
+/tv_dump/
+flashdump/
+# raw filesystem / partition images and dumps
+*.ext4
+*.ext4.gz
+*.squashfs
+*.img
+/RELEASE
+
+# --- Personal recordings -------------------------------------------------------
+# The user's own camera captures. Edited project demo clips under docs/media/
+# (doom-on-lg-netcast.{mp4,gif,jpg}) are intentionally kept.
+/TRIM_*.mp4
+*-original.mp4
+
+# --- Toolchain (proprietary LG SDK, not redistributable) -----------------------
+/toolchain/
+
+# --- Third-party: ignore downloads & build trees, keep our scripts/patches -----
+/third_party/*
+!/third_party/*.sh
+!/third_party/patches/
+!/third_party/dr_libs/
+!/third_party/stb/
+!/third_party/khronos/
+# keep our scripts/configs inside otherwise-ignored build dirs
+!/third_party/retro/
+/third_party/retro/*
+!/third_party/retro/*.sh
+!/third_party/retro/*.cfg
+!/third_party/qt/
+/third_party/qt/*
+!/third_party/qt/*.sh
+# never commit downloaded archives
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.zip
+*.sig
+*.asc
+
+# --- Build output (regenerable) ------------------------------------------------
+/dist/
+/src/out/
+/build/netcast-root.ext4
+/build/busybox-*/
+/build/rootfs/
+# USB deployment staging: drop binaries/images, keep scripts
+/usb/netcast/busybox
+/usb/netcast/netcast-root*
+/usb/**/MD5SUMS
+
+# kernel module build products (src/kmod)
+/src/kmod/*.ko
+/src/kmod/*.mod.c
+/src/kmod/.*.cmd
+/src/kmod/.tmp_versions/
+/src/kmod/Module.symvers
+/src/kmod/modules.order
+# prebuilt test binaries
+/build/tests/hello
+/build/tests/thr
+/src/nctest/nctest
+
+# --- Local settings -------------------------------------------------------------
+# the TV's IP address for tools/tv.py and friends
+/tools/.tv-host
+
+# --- Logs & scratch ------------------------------------------------------------
+/logs/
+*.log
+*.orig
+*.rej
+*.tmp
+
+# --- Compiled objects ----------------------------------------------------------
+*.o
+*.a
+*.so
+*.so.*
+*.ko
+
+# --- Editor / OS ---------------------------------------------------------------
+*~
+.*.sw[op]
+.DS_Store
+
+# Python bytecode
+__pycache__/

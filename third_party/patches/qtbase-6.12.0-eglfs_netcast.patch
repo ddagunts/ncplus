@@ -1,0 +1,117 @@
+diff -ruN a/src/plugins/platforms/eglfs/deviceintegration/CMakeLists.txt b/src/plugins/platforms/eglfs/deviceintegration/CMakeLists.txt
+--- a/src/plugins/platforms/eglfs/deviceintegration/CMakeLists.txt	2026-11-20 13:29:55.562932190 -0500
++++ b/src/plugins/platforms/eglfs/deviceintegration/CMakeLists.txt	2026-11-20 13:29:55.542931954 -0500
+@@ -37,3 +37,7 @@
+ if(QT_FEATURE_opengl)
+     add_subdirectory(eglfs_emu)
+ endif()
++
++if(NETCAST_LIBNC_DIR)
++    add_subdirectory(eglfs_netcast)
++endif()
+diff -ruN a/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/CMakeLists.txt b/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/CMakeLists.txt
+--- a/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/CMakeLists.txt	1969-12-31 19:00:00.000000000 -0500
++++ b/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/CMakeLists.txt	2026-11-20 13:29:55.542931954 -0500
+@@ -0,0 +1,20 @@
++# NetCast+: eglfs on LG NetCast (HOA window via libnc). Enabled with -DNETCAST_LIBNC_DIR=<src/libnc>.
++qt_internal_add_plugin(QEglFSNetcastIntegrationPlugin
++    OUTPUT_NAME qeglfs-netcast-integration
++    PLUGIN_TYPE egldeviceintegrations
++    SOURCES
++        qeglfsnetcastmain.cpp
++    DEFINES
++        QT_EGL_NO_X11
++    INCLUDE_DIRECTORIES
++        ../../api
++        ${NETCAST_LIBNC_DIR}
++    LIBRARIES
++        Qt::Core
++        Qt::CorePrivate
++        Qt::EglFSDeviceIntegrationPrivate
++        Qt::Gui
++        Qt::GuiPrivate
++        ${NETCAST_LIBNC_LIB}
++        dl
++)
+diff -ruN a/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/eglfs_netcast.json b/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/eglfs_netcast.json
+--- a/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/eglfs_netcast.json	1969-12-31 19:00:00.000000000 -0500
++++ b/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/eglfs_netcast.json	2026-11-20 13:29:55.542931954 -0500
+@@ -0,0 +1,3 @@
++{
++    "Keys": [ "eglfs_netcast" ]
++}
+diff -ruN a/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/qeglfsnetcastmain.cpp b/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/qeglfsnetcastmain.cpp
+--- a/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/qeglfsnetcastmain.cpp	1969-12-31 19:00:00.000000000 -0500
++++ b/src/plugins/platforms/eglfs/deviceintegration/eglfs_netcast/qeglfsnetcastmain.cpp	2026-11-20 13:29:55.542931954 -0500
+@@ -0,0 +1,71 @@
++// eglfs_netcast: Qt eglfs on LG NetCast TVs. The app registers with LG's process manager through
++// libnc (NetCast+), and the EGL native window is the HOA window ID that procmgr assigns.
++// Input comes from Qt's own evdev handlers; /dev/fb0 is never opened.
++#include "private/qeglfsdeviceintegration_p.h"
++#include <QtCore/qloggingcategory.h>
++#include <stdint.h>
++#include "nc.h"
++
++QT_BEGIN_NAMESPACE
++
++class QEglFSNetcastIntegration : public QEglFSDeviceIntegration
++{
++public:
++    void platformInit() override
++    {
++        nc_config cfg = {};
++        cfg.no_egl = 1;      // Qt creates the EGL display, surface and context itself
++        cfg.no_evdev = 1;    // Qt's evdev keyboard/mouse handlers read /dev/input
++        if (nc_init(&cfg) != 0)
++            qFatal("eglfs_netcast: could not register with LG's process manager (run via run-app.sh)");
++    }
++    void platformDestroy() override { nc_shutdown(); }
++    QSize screenSize() const override
++    {
++        return QSize(nc_width() > 0 ? nc_width() : 1280, nc_height() > 0 ? nc_height() : 720);
++    }
++    // 96 dpi, so point sizes come out the same as on a desktop
++    QSizeF physicalScreenSize() const override
++    {
++        QSize s = screenSize();
++        return QSizeF(s.width() * 25.4 / 96.0, s.height() * 25.4 / 96.0);
++    }
++    QDpi logicalDpi() const override { return QDpi(96, 96); }
++    QDpi logicalBaseDpi() const override { return QDpi(96, 96); }
++    int screenDepth() const override { return 32; }
++    QImage::Format screenFormat() const override { return QImage::Format_RGB32; }
++    qreal refreshRate() const override { return 60; }
++    QSurfaceFormat surfaceFormatFor(const QSurfaceFormat &in) const override
++    {
++        QSurfaceFormat f = in;
++        f.setRedBufferSize(8);
++        f.setGreenBufferSize(8);
++        f.setBlueBufferSize(8);
++        f.setAlphaBufferSize(8);   // the TV composites the OSD by per-pixel alpha
++        return f;
++    }
++    EGLNativeWindowType createNativeWindow(QPlatformWindow *, const QSize &, const QSurfaceFormat &) override
++    {
++        nc_set_visible(1);
++        return (EGLNativeWindowType)(uintptr_t)nc_window_id();
++    }
++    void destroyNativeWindow(EGLNativeWindowType) override {}
++    void presentBuffer(QPlatformSurface *) override
++    {
++        if (!m_shown) { nc_update_window(); m_shown = true; }   // HOA_GX_UpdateWindow after frame 1
++    }
++private:
++    bool m_shown = false;
++};
++
++class QEglFSNetcastIntegrationPlugin : public QEglFSDeviceIntegrationPlugin
++{
++    Q_OBJECT
++    Q_PLUGIN_METADATA(IID QEglFSDeviceIntegrationFactoryInterface_iid FILE "eglfs_netcast.json")
++public:
++    QEglFSDeviceIntegration *create() override { return new QEglFSNetcastIntegration; }
++};
++
++QT_END_NAMESPACE
++
++#include "qeglfsnetcastmain.moc"
