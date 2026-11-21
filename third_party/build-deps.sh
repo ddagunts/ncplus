@@ -177,6 +177,11 @@ step_kmod() {  # optional: vanilla 3.0.13 prepared with the TV's vermagic, then 
     tar -C "$K" -xJf "$K/linux-3.0.13.tar.xz"
     (cd "$K/linux-3.0.13" && export PATH=$K/$BL/bin:$PATH
      cp include/linux/compiler-gcc4.h include/linux/compiler-gcc7.h
+     # The TV's PHYS_OFFSET is 0x0 (verified: _text va 0xc0029000 -> phys 0x29000),
+     # not vexpress's 0x60000000. With CONFIG_ARM_PATCH_PHYS_VIRT off, PHYS_OFFSET is
+     # a compile-time constant, so a module's virt_to_phys() would be wrong by
+     # 0x60000000 unless we fix it here. Only affects phys<->virt arithmetic, not ABI.
+     sed -i 's/UL(0x60000000)/UL(0x00000000)/' arch/arm/mach-vexpress/include/mach/memory.h
      make ARCH=arm CROSS_COMPILE=arm-linux- vexpress_defconfig > /dev/null
      # match the TV: "3.0.13 SMP preempt mod_unload ARMv7", 3G/1G split
      ./scripts/config --enable PREEMPT --disable PREEMPT_NONE --disable PREEMPT_VOLUNTARY --enable MODULES \

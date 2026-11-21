@@ -1,1 +1,1 @@
-obj-m := nchello.o xpad.o xpadone.o
+obj-m := nchello.o xpad.o xpadone.o nckexec.o

@@ -29,7 +29,7 @@ Last updated: 2026-11-20. `telnet <TV IP>` gives a root BusyBox shell (no login)
 | Root fs | squashfs, read-only; many squashfs/unionfs mounts under `/mnt` |
 | Writable flash | ext4 partitions: `/mnt/flash/data`, `/mnt/lg/cmn_data`, `/mnt/appstore`, `/home`, `/mnt/system_app` (don't touch) |
 | Load avg ~40 | harmless: MTK kernel threads in D state; CPU ~80% idle |
-| kexec | not compiled in (only the weak `sys_kexec_load` stub) |
+| kexec | not compiled in (only the weak `sys_kexec_load` stub); `nckexec.ko` does it from a module (see Kernel modules) |
 | Watchdog | no `/dev/watchdog` in Linux |
 
 Boot: the bootloader passes `root=/dev/mmcblk0p16 rootfstype=squashfs lginit=/dev/mmcblk0p17 bootmode=auto`.
@@ -377,6 +377,44 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
   the kernel build it was checked against.
 - `src/kmod/xpad.c` (vanilla xpad) is not shipped: it duplicates the built-in driver and writes `input_dev` at
   vanilla offsets.
+
+### Warm boot of an unsigned kernel from RAM: `nckexec.ko` (working, 2026-11-20)
+
+U-Boot only RSA-checks a kernel it loads from flash. `src/kmod/nckexec.c` hands the running kernel over to
+another kernel in RAM, so the next kernel is never checked, and no flash write is involved.
+**Tested on this TV:** booting the stock kernel through it gives a fully working system. It was back on telnet
+~70 s after the jump, LG's RELEASE was running, all 726 MB of RAM was present, and the remotes reconnected.
+Proof that it came from our handoff and not a reset through U-Boot: `/proc/cmdline` ends in the added
+`maxcpus=1 panic=5`, only one CPU is online, and printk timestamps start at ~1079 s while uptime is ~74 s
+(the SoC timer was never reset).
+
+- **Kernel image:** p21 is an MTK LZ4P container (`tools/unlz4p.py`): a header, the u32 compressed size of each
+  64 KiB block, then raw LZ4 blocks. It holds a uImage (load/entry `0x7fc0`, U-Boot `bootm 0x7FC0`) around a raw
+  ARM `Image` linked at phys `0x8000` (`stext` 0xc0008000, PHYS_OFFSET 0). It matches the running kernel's text
+  byte for byte. machine_desc: nr 5398 `MT5398`, `boot_params` 0x100, `fixup` NULL. The tag table has only the
+  standard ATAGs.
+- **Staging (`insmod`):** the image goes into single pages, all above 16 MB (so none lies in the destination;
+  no large contiguous allocation). ATAGs are built fresh: CORE, MEM per `System RAM` bank
+  (`0x26000000@0`, `0x08800000@0x40000000`), and CMDLINE (this boot's line plus `append=`; busybox insmod
+  drops quotes, so `append=` takes `;` between arguments). A {dest, src, len} list puts the ATAGs at `0x100` and
+  the Image at `0x8000`.
+- **`go`:** first `kernel_restart_prepare()`, which runs the reboot notifiers and `device_shutdown()` (stops USB
+  DMA). Then IRQ/FIQ off, `setup_mm_for_reboot()` (1:1 map), and a flush of L1 and the PL310. A stub at its
+  physical address, using no stack and no kernel code, then does: D-cache off; L1 clean+invalidate by set/way;
+  PL310 clean+invalidate by way; MMU, I-cache and branch prediction off; copy; enter with
+  `r0=0, r1=5398, r2=0x100`.
+- **PL310:** r3p2 (`0x410000c8`), 16-way, already enabled; the kernel maps it at VA `0xf2000000`. `l2x0_base` is
+  not in kallsyms; its address comes from the literal pool of `l2x0_disable` (`ldr r5, =&l2x0_base`), and
+  `l2x0_way_mask` follows it. `__l2x0_flush_all` is a plain way operation with no debug-register writes.
+- **CPU1:** it has to be offlined first (`echo 0 > /sys/devices/system/cpu/cpu1/online`). The stock
+  `platform_cpu_die` flushes L1, clears the ACTLR SMP bit and SCTLR.C, and waits in WFI for `pen_release`: a
+  clean park. The next kernel must use `maxcpus=1`. Releasing CPU1 would send it back into the old kernel's
+  hotplug code, and bringing up the second core under the new kernel needs a real holding pen.
+- Module gotchas on this tree: no `%pa` (it arrived in 3.8). The vexpress `PLAT_PHYS_OFFSET` has to be patched
+  to 0 (`build-deps.sh`), otherwise `virt_to_phys` is off by `0x60000000`.
+- Run: `src/kmod/nckexec-fire.sh`, copied to the stick next to the module and the image (`sync`, CPU1 offline,
+  `insmod … 'append=maxcpus=1;panic=5'`, `go`).
+  If the new kernel fails it panics, and `panic=5` reboots through the normal signed boot.
 
 ## Qt 6 / QML (in progress, 2026-11-20)
 
