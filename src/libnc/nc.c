@@ -69,6 +69,7 @@ static int (*hoa_get_res)(uint32_t, uint32_t *, uint32_t *);
 static int (*hoa_set_res)(uint32_t, uint32_t, uint32_t);
 static void *g_af;
 void *nc_hoa_sym(const char *name) { return g_af ? dlsym(g_af, name) : 0; }
+static void pm_debug(const char *when);
 
 /* ------------------------------------------------------------- state */
 #define MAXDEV 32
@@ -79,6 +80,7 @@ static struct {
     nc_config cfg;
     uint32_t wid;
     int registered;
+    int ready;            /* HOA_PROC_SetReady sent (procmgr state LOAD -> BG) */
     EGLDisplay dpy;
     EGLSurface surf;
     EGLContext ctx;
@@ -485,7 +487,11 @@ int nc_init(const nc_config *cfg) {
     if (r != 0) { nc_log("libnc: HOA_PROC_RegisterService failed (%d); launched via run-app.sh?", r); return -1; }
     S.registered = 1;
     nc_log("libnc: registered (%s)", getenv("PM_EXECARGS"));
-    if (getenv("NC_SET_READY") && hoa_set_ready) nc_log("libnc: SetReady rc=%d", hoa_set_ready());
+    pm_debug("after register");
+    if (getenv("NC_SET_READY") && hoa_set_ready) {
+        nc_log("libnc: SetReady rc=%d", hoa_set_ready());
+        S.ready = 1;
+    }
 
     if (S.cfg.no_window) {
         S.cfg.no_egl = 1;
@@ -603,6 +609,16 @@ void nc_set_visible(int v) {
     if (v && hoa_raise) hoa_raise(S.wid);
 }
 
+/* NC_PM_DEBUG=1: ask procmgr how many processes it tracks (to see whether exits free their slot) */
+static void pm_debug(const char *when) {
+    static int (*count)(uint32_t *);
+    if (!getenv("NC_PM_DEBUG")) return;
+    if (!count) count = (int (*)(uint32_t *))nc_hoa_sym("HOA_PROC_GetRunningProcessCount");
+    uint32_t n = 0;
+    int r = count ? count(&n) : -99;
+    nc_log("libnc: procmgr running count %s: rc=%d n=%u", when, r, n);
+}
+
 void nc_shutdown(void) {
     if (!S.inited && !S.registered) return;
     if (!S.cfg.no_window) window_visible(S.wid, 0);
@@ -614,12 +630,26 @@ void nc_shutdown(void) {
         eglTerminate(S.dpy);
     }
 #endif
-    for (int i = 0; i < MAXDEV; i++) if (S.devfd[i] >= 0) close(S.devfd[i]);
+    pm_debug("before unregister");
+    /* procmgr's per-app state machine (procmgr .data 0x75214, {state, signal, handler}):
+     *   INIT 0x10 -RegisterService-> LOAD 0x20 -SetReady-> BG 0x41 <-> FG 0x42 -SetTerminate-> TERM 0x80
+     *   UnregisterService (0x100) is accepted only from BG or TERM; its handler deletes the proc table entry
+     *   and resets the window (hence after
+     *   the EGL teardown). From LOAD there is no transition, so procmgr answered "false" (rc=-1) and kept
+     *   the slot until a power cycle. So: SetReady (fire-and-forget; must not be sent twice, a repeat
+     *   gets no reply) and then unregister. One bus connection keeps the two messages in order. */
+    if (S.registered && !S.ready && hoa_set_ready) {
+        hoa_set_ready();
+        S.ready = 1;
+    }
     if (S.registered && hoa_unregister) {
         int r = hoa_unregister();
         nc_log("libnc: unregister rc=%d", r);
+        S.registered = 0;
+        pm_debug("after unregister");
     }
-    S.inited = S.registered = 0;
+    for (int i = 0; i < MAXDEV; i++) if (S.devfd[i] >= 0) close(S.devfd[i]);
+    S.inited = S.registered = S.ready = 0;
 }
 
 void nc_exit(int code) {
