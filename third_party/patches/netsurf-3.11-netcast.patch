@@ -1,0 +1,1131 @@
+diff -ru a/libnsfb/Makefile b/libnsfb/Makefile
+--- a/libnsfb/Makefile
++++ b/libnsfb/Makefile
+@@ -44,16 +44,16 @@
+ 
+ # determine which surface handlers can be compiled based upon avalable library
+ $(eval $(call pkg_config_package_available,NSFB_VNC_AVAILABLE,libvncserver))
+-$(eval $(call pkg_config_package_available,NSFB_SDL_AVAILABLE,sdl))
++$(eval $(call pkg_config_package_available,NSFB_SDL_AVAILABLE,sdl2))
+ $(eval $(call pkg_config_package_available,NSFB_XCB_AVAILABLE,$(NSFB_XCB_PKG_NAMES)))
+ $(eval $(call pkg_config_package_available,NSFB_WLD_AVAILABLE,wayland-client))
+ 
+ # Flags and setup for each support library
+ ifeq ($(NSFB_SDL_AVAILABLE),yes)
+-  $(eval $(call pkg_config_package_add_flags,sdl,CFLAGS))
+-  $(eval $(call pkg_config_package_add_flags,sdl,TESTCFLAGS,TESTLDFLAGS))
++  $(eval $(call pkg_config_package_add_flags,sdl2,CFLAGS))
++  $(eval $(call pkg_config_package_add_flags,sdl2,TESTCFLAGS,TESTLDFLAGS))
+ 
+-  REQUIRED_PKGS := $(REQUIRED_PKGS) sdl
++  REQUIRED_PKGS := $(REQUIRED_PKGS) sdl2
+ endif 
+ 
+ ifeq ($(NSFB_XCB_AVAILABLE),yes)
+diff -ru a/libnsfb/src/surface/sdl.c b/libnsfb/src/surface/sdl.c
+--- a/libnsfb/src/surface/sdl.c
++++ b/libnsfb/src/surface/sdl.c
+@@ -1,14 +1,25 @@
+ /*
+- * Copyright 2009 Vincent Sanders <vince@simtec.co.uk>
++ * SDL2 surface for libnsfb (replaces the SDL 1.2 one), written for NetCast+ on LG NetCast TVs.
++ *
++ * Copyright 2009 Vincent Sanders <vince@simtec.co.uk> (original SDL 1.2 surface)
++ * Copyright 2026 NetCast+ contributors (SDL2 port, remote-control pointer)
+  *
+  * This file is part of libnsfb, http://www.netsurf-browser.org/
+  * Licenced under the MIT License,
+  *                http://www.opensource.org/licenses/mit-license.php
++ *
++ * Drawing goes to a shadow buffer (XRGB8888); dirty areas are uploaded to a streaming texture and
++ * presented once before the browser waits for input, so many small updates cost one frame.
++ *
++ * TV remote (no pointer): in pointer mode (the default) arrows move a pointer, OK clicks, and pushing
++ * against the top/bottom edge scrolls. Typing a letter on a keyboard switches to text mode (arrows and
++ * Enter go to the page); GREEN (F2) toggles the mode, Back (Escape) in text mode returns to pointer mode.
+  */
+ 
+ #include <stdbool.h>
+ #include <stdlib.h>
+-#include <SDL/SDL.h>
++#include <string.h>
++#include <SDL.h>
+ 
+ #include "libnsfb.h"
+ #include "libnsfb_event.h"
+@@ -17,719 +28,429 @@
+ 
+ #include "nsfb.h"
+ #include "surface.h"
+-#include "palette.h"
+ #include "plot.h"
+ #include "cursor.h"
+ 
+-enum nsfb_key_code_e sdl_nsfb_map[] = {
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_BACKSPACE,
+-    NSFB_KEY_TAB,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_CLEAR,
+-    NSFB_KEY_RETURN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_PAUSE,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_ESCAPE,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_SPACE,
+-    NSFB_KEY_EXCLAIM,
+-    NSFB_KEY_QUOTEDBL,
+-    NSFB_KEY_HASH,
+-    NSFB_KEY_DOLLAR,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_AMPERSAND,
+-    NSFB_KEY_QUOTE,
+-    NSFB_KEY_LEFTPAREN,
+-    NSFB_KEY_RIGHTPAREN,
+-    NSFB_KEY_ASTERISK,
+-    NSFB_KEY_PLUS,
+-    NSFB_KEY_COMMA,
+-    NSFB_KEY_MINUS,
+-    NSFB_KEY_PERIOD,
+-    NSFB_KEY_SLASH,
+-    NSFB_KEY_0,
+-    NSFB_KEY_1,
+-    NSFB_KEY_2,
+-    NSFB_KEY_3,
+-    NSFB_KEY_4,
+-    NSFB_KEY_5,
+-    NSFB_KEY_6,
+-    NSFB_KEY_7,
+-    NSFB_KEY_8,
+-    NSFB_KEY_9,
+-    NSFB_KEY_COLON,
+-    NSFB_KEY_SEMICOLON,
+-    NSFB_KEY_LESS,
+-    NSFB_KEY_EQUALS,
+-    NSFB_KEY_GREATER,
+-    NSFB_KEY_QUESTION,
+-    NSFB_KEY_AT,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_LEFTBRACKET,
+-    NSFB_KEY_BACKSLASH,
+-    NSFB_KEY_RIGHTBRACKET,
+-    NSFB_KEY_CARET,
+-    NSFB_KEY_UNDERSCORE,
+-    NSFB_KEY_BACKQUOTE,
+-    NSFB_KEY_a,
+-    NSFB_KEY_b,
+-    NSFB_KEY_c,
+-    NSFB_KEY_d,
+-    NSFB_KEY_e,
+-    NSFB_KEY_f,
+-    NSFB_KEY_g,
+-    NSFB_KEY_h,
+-    NSFB_KEY_i,
+-    NSFB_KEY_j,
+-    NSFB_KEY_k,
+-    NSFB_KEY_l,
+-    NSFB_KEY_m,
+-    NSFB_KEY_n,
+-    NSFB_KEY_o,
+-    NSFB_KEY_p,
+-    NSFB_KEY_q,
+-    NSFB_KEY_r,
+-    NSFB_KEY_s,
+-    NSFB_KEY_t,
+-    NSFB_KEY_u,
+-    NSFB_KEY_v,
+-    NSFB_KEY_w,
+-    NSFB_KEY_x,
+-    NSFB_KEY_y,
+-    NSFB_KEY_z,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_DELETE,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_KP0,
+-    NSFB_KEY_KP1,
+-    NSFB_KEY_KP2,
+-    NSFB_KEY_KP3,
+-    NSFB_KEY_KP4,
+-    NSFB_KEY_KP5,
+-    NSFB_KEY_KP6,
+-    NSFB_KEY_KP7,
+-    NSFB_KEY_KP8,
+-    NSFB_KEY_KP9,
+-    NSFB_KEY_KP_PERIOD,
+-    NSFB_KEY_KP_DIVIDE,
+-    NSFB_KEY_KP_MULTIPLY,
+-    NSFB_KEY_KP_MINUS,
+-    NSFB_KEY_KP_PLUS,
+-    NSFB_KEY_KP_ENTER,
+-    NSFB_KEY_KP_EQUALS,
+-    NSFB_KEY_UP,
+-    NSFB_KEY_DOWN,
+-    NSFB_KEY_RIGHT,
+-    NSFB_KEY_LEFT,
+-    NSFB_KEY_INSERT,
+-    NSFB_KEY_HOME,
+-    NSFB_KEY_END,
+-    NSFB_KEY_PAGEUP,
+-    NSFB_KEY_PAGEDOWN,
+-    NSFB_KEY_F1,
+-    NSFB_KEY_F2,
+-    NSFB_KEY_F3,
+-    NSFB_KEY_F4,
+-    NSFB_KEY_F5,
+-    NSFB_KEY_F6,
+-    NSFB_KEY_F7,
+-    NSFB_KEY_F8,
+-    NSFB_KEY_F9,
+-    NSFB_KEY_F10,
+-    NSFB_KEY_F11,
+-    NSFB_KEY_F12,
+-    NSFB_KEY_F13,
+-    NSFB_KEY_F14,
+-    NSFB_KEY_F15,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_UNKNOWN,
+-    NSFB_KEY_NUMLOCK,
+-    NSFB_KEY_CAPSLOCK,
+-    NSFB_KEY_SCROLLOCK,
+-    NSFB_KEY_RSHIFT,
+-    NSFB_KEY_LSHIFT,
+-    NSFB_KEY_RCTRL,
+-    NSFB_KEY_LCTRL,
+-    NSFB_KEY_RALT,
+-    NSFB_KEY_LALT,
+-    NSFB_KEY_RMETA,
+-    NSFB_KEY_LMETA,
+-    NSFB_KEY_LSUPER,
+-    NSFB_KEY_RSUPER,
+-    NSFB_KEY_MODE,
+-    NSFB_KEY_COMPOSE,
+-    NSFB_KEY_HELP,
+-    NSFB_KEY_PRINT,
+-    NSFB_KEY_SYSREQ,
+-    NSFB_KEY_BREAK,
+-    NSFB_KEY_MENU,
+-    NSFB_KEY_POWER,
+-    NSFB_KEY_EURO,
+-    NSFB_KEY_UNDO,
+-};
+-
++typedef struct {
++    SDL_Window *win;
++    SDL_Renderer *ren;
++    SDL_Texture *tex;
++    nsfb_bbox_t dirty;
++    bool is_dirty;
++    /* remote pointer */
++    bool pointer_mode;
++    int px, py;
++    int last_dir;
++    Uint32 last_move;
++    int accel;
++    /* events still to deliver (a click is press + release) */
++    nsfb_event_t pending[4];
++    int npending;
++} sdl2_priv;
+ 
+-static void
+-set_palette(nsfb_t *nsfb)
++static void mark_dirty(sdl2_priv *s, int x0, int y0, int x1, int y1)
+ {
+-    SDL_Surface *sdl_screen = nsfb->surface_priv;
+-    SDL_Color palette[256];
+-    int loop = 0;
+-
+-    /* Get libnsfb palette */
+-    nsfb_palette_generate_nsfb_8bpp(nsfb->palette);
+-
+-    /* Create SDL palette from nsfb palette */
+-    for (loop = 0; loop < 256; loop++) {
+-        palette[loop].r = (nsfb->palette->data[loop]      ) & 0xFF;
+-        palette[loop].g = (nsfb->palette->data[loop] >>  8) & 0xFF;
+-        palette[loop].b = (nsfb->palette->data[loop] >> 16) & 0xFF;
+-        palette[loop].unused = 0; /* Suppress valgrind uninitialised values */
+-    }
+-
+-    /* Set SDL palette */
+-    SDL_SetColors(sdl_screen, palette, 0, 256);
++    if (x1 <= x0 || y1 <= y0)
++        return;
++    if (!s->is_dirty) {
++        s->dirty.x0 = x0; s->dirty.y0 = y0; s->dirty.x1 = x1; s->dirty.y1 = y1;
++        s->is_dirty = true;
++        return;
++    }
++    if (x0 < s->dirty.x0) s->dirty.x0 = x0;
++    if (y0 < s->dirty.y0) s->dirty.y0 = y0;
++    if (x1 > s->dirty.x1) s->dirty.x1 = x1;
++    if (y1 > s->dirty.y1) s->dirty.y1 = y1;
++}
+ 
++static void present(nsfb_t *nsfb)
++{
++    sdl2_priv *s = nsfb->surface_priv;
++    if (s == NULL || !s->is_dirty)
++        return;
++    nsfb_bbox_t d = s->dirty;
++    if (d.x0 < 0) d.x0 = 0;
++    if (d.y0 < 0) d.y0 = 0;
++    if (d.x1 > nsfb->width) d.x1 = nsfb->width;
++    if (d.y1 > nsfb->height) d.y1 = nsfb->height;
++    s->is_dirty = false;
++    if (d.x1 > d.x0 && d.y1 > d.y0) {
++        SDL_Rect r = { d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0 };
++        SDL_UpdateTexture(s->tex, &r, nsfb->ptr + d.y0 * nsfb->linelen + d.x0 * 4, nsfb->linelen);
++    }
++    SDL_RenderClear(s->ren);
++    SDL_RenderCopy(s->ren, s->tex, NULL, NULL);
++    SDL_RenderPresent(s->ren);
+ }
+ 
+-static bool 
+-sdlcopy(nsfb_t *nsfb, nsfb_bbox_t *srcbox, nsfb_bbox_t *dstbox)
++/* scroll: move pixels inside the shadow buffer, keeping the soft cursor intact */
++static bool sdl2_copy(nsfb_t *nsfb, nsfb_bbox_t *srcbox, nsfb_bbox_t *dstbox)
+ {
+-    SDL_Rect src;
+-    SDL_Rect dst;
+-    SDL_Surface *sdl_screen = nsfb->surface_priv;
+-    nsfb_bbox_t allbox;
++    sdl2_priv *s = nsfb->surface_priv;
+     struct nsfb_cursor_s *cursor = nsfb->cursor;
++    nsfb_bbox_t allbox;
++    int w = srcbox->x1 - srcbox->x0, h = srcbox->y1 - srcbox->y0;
+ 
+     nsfb_plot_add_rect(srcbox, dstbox, &allbox);
+-
+-    /* clear the cursor if its within the region to be altered */
+-    if ((cursor != NULL) &&
+-        (cursor->plotted == true) &&
+-        (nsfb_plot_bbox_intersect(&allbox, &cursor->loc))) {
++    if (cursor != NULL && cursor->plotted && nsfb_plot_bbox_intersect(&allbox, &cursor->loc))
+         nsfb_cursor_clear(nsfb, cursor);
+-    }
+ 
+-    src.x = srcbox->x0;
+-    src.y = srcbox->y0;
+-    src.w = srcbox->x1 - srcbox->x0;
+-    src.h = srcbox->y1 - srcbox->y0;
+- 
+-    dst.x = dstbox->x0;
+-    dst.y = dstbox->y0;
+-    dst.w = dstbox->x1 - dstbox->x0;
+-    dst.h = dstbox->y1 - dstbox->y0;
+- 
+-    SDL_BlitSurface(sdl_screen, &src, sdl_screen , &dst);
+-
+-    if ((cursor != NULL) && 
+-        (cursor->plotted == false)) {
+-        nsfb_cursor_plot(nsfb, cursor);
++    if (w > 0 && h > 0) {
++        uint8_t *src = nsfb->ptr + srcbox->y0 * nsfb->linelen + srcbox->x0 * 4;
++        uint8_t *dst = nsfb->ptr + dstbox->y0 * nsfb->linelen + dstbox->x0 * 4;
++        if (dstbox->y0 > srcbox->y0) {          /* moving down: copy bottom row first */
++            for (int y = h - 1; y >= 0; y--)
++                memmove(dst + y * nsfb->linelen, src + y * nsfb->linelen, (size_t)w * 4);
++        } else {
++            for (int y = 0; y < h; y++)
++                memmove(dst + y * nsfb->linelen, src + y * nsfb->linelen, (size_t)w * 4);
++        }
+     }
+ 
+-    SDL_UpdateRect(sdl_screen, dst.x, dst.y, dst.w, dst.h);
++    if (cursor != NULL && !cursor->plotted)
++        nsfb_cursor_plot(nsfb, cursor);
+ 
++    mark_dirty(s, dstbox->x0, dstbox->y0, dstbox->x1, dstbox->y1);
+     return true;
+-
+ }
+ 
+-static int sdl_set_geometry(nsfb_t *nsfb, int width, int height,
+-        enum nsfb_format_e format)
++static int make_buffers(nsfb_t *nsfb)
+ {
+-    SDL_Surface *sdl_screen;
+-
+-    nsfb->width = width;
+-    nsfb->height = height;
+-    nsfb->format = format;
+-
+-    /* select default sw plotters for format */
+-    select_plotters(nsfb);
+-
+-    nsfb->plotter_fns->copy = sdlcopy;
+-
+-    if (nsfb->surface_priv != NULL) {
+-        sdl_screen = SDL_SetVideoMode(nsfb->width,
+-                                      nsfb->height,
+-                                      nsfb->bpp,
+-                                      SDL_SWSURFACE | SDL_RESIZABLE);
+-        if (sdl_screen == NULL ) {
+-            fprintf(stderr, "Unable to resize video: %s\n", SDL_GetError());
+-            return -1;
+-        }
+-
+-        nsfb->surface_priv = sdl_screen;
+-        nsfb->ptr = sdl_screen->pixels;
+-        nsfb->linelen = sdl_screen->pitch;
++    sdl2_priv *s = nsfb->surface_priv;
++    uint8_t *buf = realloc(nsfb->ptr, (size_t)nsfb->width * nsfb->height * 4);
++    if (buf == NULL)
++        return -1;
++    nsfb->ptr = buf;
++    nsfb->linelen = nsfb->width * 4;
++    memset(buf, 0xff, (size_t)nsfb->width * nsfb->height * 4);
++    if (s->tex)
++        SDL_DestroyTexture(s->tex);
++    s->tex = SDL_CreateTexture(s->ren, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING,
++                               nsfb->width, nsfb->height);
++    if (s->tex == NULL) {
++        fprintf(stderr, "nsfb sdl2: texture: %s\n", SDL_GetError());
++        return -1;
+     }
++    mark_dirty(s, 0, 0, nsfb->width, nsfb->height);
++    return 0;
++}
+ 
++static int sdl_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
++{
++    (void)format;
++    if (width > 0) nsfb->width = width;
++    if (height > 0) nsfb->height = height;
++    nsfb->format = NSFB_FMT_XRGB8888;     /* = SDL RGB888 (0x00RRGGBB): no alpha, so always opaque */
++    select_plotters(nsfb);
++    nsfb->plotter_fns->copy = sdl2_copy;
++    if (nsfb->surface_priv != NULL)
++        return make_buffers(nsfb);
+     return 0;
+ }
+ 
+ static int sdl_initialise(nsfb_t *nsfb)
+ {
+-    SDL_Surface *sdl_screen;
+-    SDL_PixelFormat *sdl_fmt;
+-    enum nsfb_format_e fmt;
++    sdl2_priv *s;
+ 
+     if (nsfb->surface_priv != NULL)
+         return -1;
+-
+-    /* sanity checked depth. */
+-    if ((nsfb->bpp != 32) && (nsfb->bpp != 16) && (nsfb->bpp != 8))
+-        return -1;
+-
+-    /* initialise SDL library */
+-    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO) < 0 ) {
++    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO) < 0) {
+         fprintf(stderr, "Unable to init SDL: %s\n", SDL_GetError());
+         return -1;
+     }
+-
+-    sdl_screen = SDL_SetVideoMode(nsfb->width,
+-                                  nsfb->height,
+-                                  nsfb->bpp,
+-                                  SDL_SWSURFACE | SDL_RESIZABLE);
+-
+-    if (sdl_screen == NULL ) {
+-        fprintf(stderr, "Unable to set video: %s\n", SDL_GetError());
++    s = calloc(1, sizeof *s);
++    if (s == NULL)
++        return -1;
++    s->win = SDL_CreateWindow("NetSurf", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
++                              nsfb->width, nsfb->height, SDL_WINDOW_SHOWN);
++    if (s->win == NULL) {
++        fprintf(stderr, "Unable to create window: %s\n", SDL_GetError());
++        free(s);
+         return -1;
+     }
+-
+-    /* find out what pixel format we got */
+-    sdl_fmt = sdl_screen->format;
+-
+-    switch (sdl_fmt->BitsPerPixel) {
+-    case 32:
+-        if (sdl_fmt->Rshift == 0)
+-            fmt = NSFB_FMT_XBGR8888;
+-        else
+-            fmt = NSFB_FMT_XRGB8888;
+-        break;
+-
+-    default:
+-        fmt = nsfb->format;
+-        break;
+-    }
+-
+-    /* If we didn't get what we asked for, reselect plotters */
+-    if (nsfb->format != fmt) {
+-        nsfb->format = fmt;
+-
+-        if (sdl_set_geometry(nsfb, nsfb->width, nsfb->height,
+-                nsfb->format) != 0) {
+-            return -1;
+-        }
+-    }
+-
+-    nsfb->surface_priv = sdl_screen;
+-
+-    if (nsfb->bpp == 8) {
+-        nsfb_palette_new(&nsfb->palette, nsfb->width);
+-        set_palette(nsfb);
++    s->ren = SDL_CreateRenderer(s->win, -1, SDL_RENDERER_ACCELERATED);
++    if (s->ren == NULL)
++        s->ren = SDL_CreateRenderer(s->win, -1, 0);
++    if (s->ren == NULL) {
++        fprintf(stderr, "Unable to create renderer: %s\n", SDL_GetError());
++        SDL_DestroyWindow(s->win);
++        free(s);
++        return -1;
+     }
+-
+-    nsfb->ptr = sdl_screen->pixels;
+-    nsfb->linelen = sdl_screen->pitch;
+-
++    /* the window may be fixed-size (TV: 1280x720): use its real size */
++    SDL_GetWindowSize(s->win, &nsfb->width, &nsfb->height);
++    nsfb->bpp = 32;
++    nsfb->surface_priv = s;
++    s->pointer_mode = true;
++    s->px = nsfb->width / 2;
++    s->py = nsfb->height / 2;
++    if (sdl_set_geometry(nsfb, nsfb->width, nsfb->height, NSFB_FMT_XRGB8888) != 0)
++        return -1;
+     SDL_ShowCursor(SDL_DISABLE);
+-    SDL_EnableKeyRepeat(300, 50);
+-
++    SDL_StartTextInput();
+     return 0;
+ }
+ 
+ static int sdl_finalise(nsfb_t *nsfb)
+ {
+-    nsfb=nsfb;
++    sdl2_priv *s = nsfb->surface_priv;
++    if (s != NULL) {
++        if (s->tex) SDL_DestroyTexture(s->tex);
++        if (s->ren) SDL_DestroyRenderer(s->ren);
++        if (s->win) SDL_DestroyWindow(s->win);
++        free(s);
++        nsfb->surface_priv = NULL;
++    }
+     SDL_Quit();
+     return 0;
+ }
+ 
+-static uint32_t wakeeventtimer(uint32_t ival, void *param)
++static enum nsfb_key_code_e map_key(SDL_Keycode k)
+ {
+-    SDL_Event event;
+-    ival = ival;
+-    param = param;
+-
+-    event.type = SDL_USEREVENT;
+-    event.user.code = 0;
+-    event.user.data1 = 0;
+-    event.user.data2 = 0;
+-    
+-    SDL_PushEvent(&event);
++    if (k >= 0 && k < 128) {
++        if (k >= 'A' && k <= 'Z')
++            return (enum nsfb_key_code_e)(k + 32);
++        return (enum nsfb_key_code_e)k;   /* NSFB codes follow ASCII here, as SDL 1.2 keysyms did */
++    }
++    if (k >= SDLK_F1 && k <= SDLK_F12)
++        return (enum nsfb_key_code_e)(NSFB_KEY_F1 + (k - SDLK_F1));
++    if (k >= SDLK_KP_1 && k <= SDLK_KP_9)
++        return (enum nsfb_key_code_e)(NSFB_KEY_KP0 + 1 + (k - SDLK_KP_1));
++    switch (k) {
++    case SDLK_UP: return NSFB_KEY_UP;
++    case SDLK_DOWN: return NSFB_KEY_DOWN;
++    case SDLK_RIGHT: return NSFB_KEY_RIGHT;
++    case SDLK_LEFT: return NSFB_KEY_LEFT;
++    case SDLK_INSERT: return NSFB_KEY_INSERT;
++    case SDLK_HOME: return NSFB_KEY_HOME;
++    case SDLK_END: return NSFB_KEY_END;
++    case SDLK_PAGEUP: return NSFB_KEY_PAGEUP;
++    case SDLK_PAGEDOWN: return NSFB_KEY_PAGEDOWN;
++    case SDLK_KP_0: return NSFB_KEY_KP0;
++    case SDLK_KP_PERIOD: return NSFB_KEY_KP_PERIOD;
++    case SDLK_KP_ENTER: return NSFB_KEY_KP_ENTER;
++    case SDLK_KP_EQUALS: return NSFB_KEY_KP_EQUALS;
++    case SDLK_NUMLOCKCLEAR: return NSFB_KEY_NUMLOCK;
++    case SDLK_CAPSLOCK: return NSFB_KEY_CAPSLOCK;
++    case SDLK_SCROLLLOCK: return NSFB_KEY_SCROLLOCK;
++    case SDLK_RSHIFT: return NSFB_KEY_RSHIFT;
++    case SDLK_LSHIFT: return NSFB_KEY_LSHIFT;
++    case SDLK_RCTRL: return NSFB_KEY_RCTRL;
++    case SDLK_LCTRL: return NSFB_KEY_LCTRL;
++    case SDLK_RALT: return NSFB_KEY_RALT;
++    case SDLK_LALT: return NSFB_KEY_LALT;
++    case SDLK_LGUI: return NSFB_KEY_LSUPER;
++    case SDLK_RGUI: return NSFB_KEY_RSUPER;
++    case SDLK_HELP: return NSFB_KEY_HELP;
++    case SDLK_PRINTSCREEN: return NSFB_KEY_PRINT;
++    case SDLK_MENU: return NSFB_KEY_MENU;
++    case SDLK_UNDO: return NSFB_KEY_UNDO;
++    default: return NSFB_KEY_UNKNOWN;
++    }
++}
+ 
+-    return 0;
++static void push(sdl2_priv *s, enum nsfb_event_type_e type, int code)
++{
++    if (s->npending >= (int)(sizeof s->pending / sizeof s->pending[0]))
++        return;
++    nsfb_event_t *e = &s->pending[s->npending++];
++    memset(e, 0, sizeof *e);
++    e->type = type;
++    e->value.keycode = code;
+ }
+ 
+-static bool sdl_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
++static void push_move(sdl2_priv *s)
+ {
+-    int got_event;
+-    SDL_Event sdlevent;
++    if (s->npending >= (int)(sizeof s->pending / sizeof s->pending[0]))
++        return;
++    nsfb_event_t *e = &s->pending[s->npending++];
++    memset(e, 0, sizeof *e);
++    e->type = NSFB_EVENT_MOVE_ABSOLUTE;
++    e->value.vector.x = s->px;
++    e->value.vector.y = s->py;
++}
+ 
+-    nsfb = nsfb; /* unused */
++static bool pop(sdl2_priv *s, nsfb_event_t *event)
++{
++    if (s->npending == 0)
++        return false;
++    *event = s->pending[0];
++    memmove(&s->pending[0], &s->pending[1], (size_t)(--s->npending) * sizeof s->pending[0]);
++    return true;
++}
+ 
+-    if (timeout == 0) {
+-        got_event = SDL_PollEvent(&sdlevent);
++/* remote arrows in pointer mode: accelerate while a direction is held */
++static void pointer_step(nsfb_t *nsfb, sdl2_priv *s, SDL_Keycode k)
++{
++    Uint32 now = SDL_GetTicks();
++    int dir = k == SDLK_UP ? 0 : k == SDLK_DOWN ? 1 : k == SDLK_LEFT ? 2 : 3;
++    if (dir == s->last_dir && now - s->last_move < 250) {
++        if (s->accel < 10) s->accel++;
+     } else {
+-        if (timeout > 0) {
+-            /* setup wake timer to ensure the wait event below exits no later
+-             * than when the timeout has occoured.
+-             */
+-            SDL_TimerID tid;
+-            tid = SDL_AddTimer(timeout, wakeeventtimer, NULL);
+-            got_event = SDL_WaitEvent(&sdlevent);
+-            if ((got_event == 0) || (sdlevent.type != SDL_USEREVENT)) {
+-                SDL_RemoveTimer(tid);
+-            }
+-        } else {
+-	    got_event = SDL_WaitEvent(&sdlevent);
+-        }
++        s->accel = 0;
+     }
++    s->last_dir = dir;
++    s->last_move = now;
++    int step = 8 + s->accel * 5;
++    int ox = s->px, oy = s->py;
++    switch (dir) {
++    case 0: s->py -= step; break;
++    case 1: s->py += step; break;
++    case 2: s->px -= step; break;
++    default: s->px += step; break;
++    }
++    if (s->px < 0) s->px = 0;
++    if (s->px > nsfb->width - 1) s->px = nsfb->width - 1;
++    if (s->py < 0) s->py = 0;
++    if (s->py > nsfb->height - 1) s->py = nsfb->height - 1;
++    if (s->px != ox || s->py != oy)
++        push_move(s);
++    /* pushing against the top/bottom edge scrolls the page under the pointer */
++    if (dir == 0 && oy == 0)
++        push(s, NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_4);
++    else if (dir == 1 && oy == nsfb->height - 1)
++        push(s, NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_5);
++}
+ 
+-    /* Do nothing if there was no event */
+-    if (got_event == 0) {
+-        return false;
+-    }
+-
+-    event->type = NSFB_EVENT_NONE;
+-
+-    switch (sdlevent.type) {
++static void translate(nsfb_t *nsfb, sdl2_priv *s, SDL_Event *ev)
++{
++    switch (ev->type) {
+     case SDL_KEYDOWN:
+-	event->type = NSFB_EVENT_KEY_DOWN;
+-	event->value.keycode = sdl_nsfb_map[sdlevent.key.keysym.sym];
+-	break;
+-
+-    case SDL_KEYUP:
+-	event->type = NSFB_EVENT_KEY_UP;
+-	event->value.keycode = sdl_nsfb_map[sdlevent.key.keysym.sym];
+-	break;
+-
++    case SDL_KEYUP: {
++        SDL_Keycode k = ev->key.keysym.sym;
++        bool down = ev->type == SDL_KEYDOWN;
++        if (down && k == SDLK_F2) {                       /* GREEN: toggle pointer / text mode */
++            s->pointer_mode = !s->pointer_mode;
++            return;
++        }
++        if (s->pointer_mode) {
++            if (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_LEFT || k == SDLK_RIGHT) {
++                if (down) pointer_step(nsfb, s, k);
++                return;
++            }
++            if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {   /* OK = left click */
++                if (down && !ev->key.repeat) push(s, NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_1);
++                else if (!down) push(s, NSFB_EVENT_KEY_UP, NSFB_KEY_MOUSE_1);
++                return;
++            }
++            if (down && ((k >= 'a' && k <= 'z') || k == SDLK_TAB))
++                s->pointer_mode = false;                  /* keyboard typing: arrows/Enter go to the page */
++        } else if (down && k == SDLK_ESCAPE) {
++            s->pointer_mode = true;                       /* Back leaves text mode */
++            return;
++        } else if (!down && k == SDLK_ESCAPE) {
++            return;
++        }
++        push(s, down ? NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP, map_key(k));
++        return;
++    }
+     case SDL_MOUSEBUTTONDOWN:
+-	event->type = NSFB_EVENT_KEY_DOWN;
+-
+-	switch (sdlevent.button.button) {
+-
+-	case SDL_BUTTON_LEFT:
+-	    event->value.keycode = NSFB_KEY_MOUSE_1;
+-	    break;
+-
+-	case SDL_BUTTON_MIDDLE:
+-	    event->value.keycode = NSFB_KEY_MOUSE_2;
+-	    break;
+-
+-	case SDL_BUTTON_RIGHT:
+-	    event->value.keycode = NSFB_KEY_MOUSE_3;
+-	    break;
+-
+-	case SDL_BUTTON_WHEELUP:
+-	    event->value.keycode = NSFB_KEY_MOUSE_4;
+-	    break;
+-
+-	case SDL_BUTTON_WHEELDOWN:
+-	    event->value.keycode = NSFB_KEY_MOUSE_5;
+-	    break;
+-	}
+-	break;
+-
+-    case SDL_MOUSEBUTTONUP:
+-	event->type = NSFB_EVENT_KEY_UP;
+-
+-	switch (sdlevent.button.button) {
+-
+-	case SDL_BUTTON_LEFT:
+-	    event->value.keycode = NSFB_KEY_MOUSE_1;
+-	    break;
+-
+-	case SDL_BUTTON_MIDDLE:
+-	    event->value.keycode = NSFB_KEY_MOUSE_2;
+-	    break;
+-
+-	case SDL_BUTTON_RIGHT:
+-	    event->value.keycode = NSFB_KEY_MOUSE_3;
+-	    break;
+-
+-	case SDL_BUTTON_WHEELUP:
+-	    event->value.keycode = NSFB_KEY_MOUSE_4;
+-	    break;
+-
+-	case SDL_BUTTON_WHEELDOWN:
+-	    event->value.keycode = NSFB_KEY_MOUSE_5;
+-	    break;
+-	}
+-	break;
+-
++    case SDL_MOUSEBUTTONUP: {
++        int code = ev->button.button == SDL_BUTTON_LEFT ? NSFB_KEY_MOUSE_1 :
++                   ev->button.button == SDL_BUTTON_MIDDLE ? NSFB_KEY_MOUSE_2 :
++                   ev->button.button == SDL_BUTTON_RIGHT ? NSFB_KEY_MOUSE_3 : 0;
++        if (code)
++            push(s, ev->type == SDL_MOUSEBUTTONDOWN ? NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP, code);
++        return;
++    }
++    case SDL_MOUSEWHEEL:
++        if (ev->wheel.y > 0) push(s, NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_4);
++        else if (ev->wheel.y < 0) push(s, NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_5);
++        return;
+     case SDL_MOUSEMOTION:
+-	event->type = NSFB_EVENT_MOVE_ABSOLUTE;
+-	event->value.vector.x = sdlevent.motion.x;
+-	event->value.vector.y = sdlevent.motion.y;
+-	event->value.vector.z = 0;
+-	break;
+-
++        s->px = ev->motion.x;
++        s->py = ev->motion.y;
++        push_move(s);
++        return;
+     case SDL_QUIT:
+-	event->type = NSFB_EVENT_CONTROL;
+-	event->value.controlcode = NSFB_CONTROL_QUIT;
+-	break;
+-
+-    case SDL_USEREVENT:
+-	event->type = NSFB_EVENT_CONTROL;
+-	event->value.controlcode = NSFB_CONTROL_TIMEOUT;
+-	break;
+-
+-    case SDL_VIDEORESIZE:
+-	event->type = NSFB_EVENT_RESIZE;
+-	event->value.resize.w = sdlevent.resize.w;
+-	event->value.resize.h = sdlevent.resize.h;
+-	break;
++        if (s->npending < 4) {
++            nsfb_event_t *e = &s->pending[s->npending++];
++            memset(e, 0, sizeof *e);
++            e->type = NSFB_EVENT_CONTROL;
++            e->value.controlcode = NSFB_CONTROL_QUIT;
++        }
++        return;
++    case SDL_WINDOWEVENT:
++        if (ev->window.event == SDL_WINDOWEVENT_EXPOSED)
++            mark_dirty(s, 0, 0, nsfb->width, nsfb->height);
++        return;
++    default:
++        return;
+     }
++}
+ 
+-    return true;
++static bool sdl_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
++{
++    sdl2_priv *s = nsfb->surface_priv;
++    SDL_Event ev;
++
++    if (pop(s, event))
++        return true;
++    present(nsfb);          /* everything drawn since the last wait goes out in one frame */
++
++    for (;;) {
++        int got;
++        if (timeout == 0)
++            got = SDL_PollEvent(&ev);
++        else
++            got = SDL_WaitEventTimeout(&ev, timeout < 0 ? 100 : timeout);
++        if (!got) {
++            if (timeout < 0)
++                continue;
++            event->type = NSFB_EVENT_CONTROL;
++            event->value.controlcode = NSFB_CONTROL_TIMEOUT;
++            return timeout > 0;
++        }
++        translate(nsfb, s, &ev);
++        if (pop(s, event))
++            return true;
++        if (timeout == 0)
++            return false;
++    }
+ }
+ 
+ static int sdl_claim(nsfb_t *nsfb, nsfb_bbox_t *box)
+ {
+     struct nsfb_cursor_s *cursor = nsfb->cursor;
+-
+-    if ((cursor != NULL) &&
+-        (cursor->plotted == true) &&
+-        (nsfb_plot_bbox_intersect(box, &cursor->loc))) {
++    if (cursor != NULL && cursor->plotted && nsfb_plot_bbox_intersect(box, &cursor->loc))
+         nsfb_cursor_clear(nsfb, cursor);
+-    }
+     return 0;
+ }
+ 
+-static int
+-sdl_cursor(nsfb_t *nsfb, struct nsfb_cursor_s *cursor)
++static int sdl_cursor(nsfb_t *nsfb, struct nsfb_cursor_s *cursor)
+ {
+-    SDL_Surface *sdl_screen = nsfb->surface_priv;
+-    nsfb_bbox_t redraw;
+-    nsfb_bbox_t fbarea;
++    sdl2_priv *s = nsfb->surface_priv;
++    nsfb_bbox_t redraw, fbarea;
+ 
+-    if ((cursor != NULL) && (cursor->plotted == true)) {
++    if (cursor != NULL && cursor->plotted) {
+         nsfb_bbox_t loc_shift = cursor->loc;
+         loc_shift.x0 -= cursor->hotspot_x;
+         loc_shift.y0 -= cursor->hotspot_y;
+         loc_shift.x1 -= cursor->hotspot_x;
+         loc_shift.y1 -= cursor->hotspot_y;
+-
+         nsfb_plot_add_rect(&cursor->savloc, &loc_shift, &redraw);
+-
+-        /* screen area */
+         fbarea.x0 = 0;
+         fbarea.y0 = 0;
+         fbarea.x1 = nsfb->width;
+         fbarea.y1 = nsfb->height;
+-
+         nsfb_plot_clip(&fbarea, &redraw);
+-
+         nsfb_cursor_clear(nsfb, cursor);
+-
+         nsfb_cursor_plot(nsfb, cursor);
+-
+-        SDL_UpdateRect(sdl_screen,
+-                       redraw.x0,
+-                       redraw.y0,
+-                       redraw.x1 - redraw.x0,
+-                       redraw.y1 - redraw.y0);
+-
+-
++        mark_dirty(s, redraw.x0, redraw.y0, redraw.x1, redraw.y1);
+     }
+     return true;
+ }
+ 
+-
+ static int sdl_update(nsfb_t *nsfb, nsfb_bbox_t *box)
+ {
+-    SDL_Surface *sdl_screen = nsfb->surface_priv;
++    sdl2_priv *s = nsfb->surface_priv;
+     struct nsfb_cursor_s *cursor = nsfb->cursor;
+ 
+-    if ((cursor != NULL) &&
+-	(cursor->plotted == false)) {
++    if (cursor != NULL && !cursor->plotted)
+         nsfb_cursor_plot(nsfb, cursor);
+-    }
+-
+-    SDL_UpdateRect(sdl_screen,
+-                   box->x0,
+-                   box->y0,
+-                   box->x1 - box->x0,
+-                   box->y1 - box->y0);
+-
++    mark_dirty(s, box->x0, box->y0, box->x1, box->y1);
++    if (cursor != NULL)
++        mark_dirty(s, cursor->savloc.x0, cursor->savloc.y0, cursor->savloc.x1, cursor->savloc.y1);
+     return 0;
+ }
+ 
+@@ -744,10 +465,3 @@
+ };
+ 
+ NSFB_SURFACE_DEF(sdl, NSFB_SURFACE_SDL, &sdl_rtns)
+-
+-/*
+- * Local variables:
+- *  c-basic-offset: 4
+- *  tab-width: 8
+- * End:
+- */
+diff -ru a/netsurf/frontends/framebuffer/gui.c b/netsurf/frontends/framebuffer/gui.c
+--- a/netsurf/frontends/framebuffer/gui.c
++++ b/netsurf/frontends/framebuffer/gui.c
+@@ -859,6 +859,14 @@
+ 	case NSFB_EVENT_KEY_DOWN:
+ 		switch (cbi->event->value.keycode) {
+ 
++		case NSFB_KEY_ESCAPE:
++			/* TV remote Back: previous page, or quit on the first page */
++			if (browser_window_back_available(gw->bw))
++				browser_window_history_back(gw->bw, false);
++			else
++				fb_complete = true;
++			break;
++
+ 		case NSFB_KEY_DELETE:
+ 			browser_window_key_press(gw->bw, NS_KEY_DELETE_RIGHT);
+ 			break;

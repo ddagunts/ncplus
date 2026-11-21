@@ -4,7 +4,7 @@
 #   third_party/build-deps.sh            all steps, in order
 #   third_party/build-deps.sh doom rdp   only the named steps
 #
-# Steps: sdl2 mixer ttf smb2 vterm lvgl doom tyrian rdp retroarch   (optional, not in the default list: kmod)
+# Steps: sdl2 mixer ttf smb2 vterm lvgl doom tyrian rdp retroarch ffmpeg   (optional, not in the default list: kmod)
 # Needs: the openlgtv buildroot-nc4 SDK in toolchain/ (see README), curl, git, unzip, python3, a host gcc.
 # Binaries are staged in src/out/<app>/ where build/package.sh picks them up.
 # Sources already unpacked are reused, so re-running a step only rebuilds it.
@@ -164,6 +164,118 @@ step_rdp() {
   "${X}strip" -o "$OUT/rdp/sdl-freerdp" "$TP/freerdp-build/client/SDL/SDL2/sdl-freerdp"
 }
 
+step_ffmpeg() {  # FFmpeg + ffplay: software decode on the CPU (NEON), YUV->RGB on the GPU via SDL's GLES2 renderer
+  log "FFmpeg 9.1 (ffplay, ffprobe, ffmpeg)"
+  fetch https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz ffmpeg-9.1.tar.xz \
+        1a4d394ae63d190a526cd052eb4415c156b5c5e2df37efab41a7de0b8fde2433
+  unpack ffmpeg-9.1.tar.xz ffmpeg-9.1
+  # ffplay: remote OK pauses; exit unregisters from LG's procmgr and skips LG's (hanging) destructors
+  if [ ! -f "$TP/ffmpeg-9.1/.netcast-patched" ]; then
+    patch -d "$TP/ffmpeg-9.1" -p1 < "$TP/patches/ffmpeg-9.1-ffplay-netcast.patch" && touch "$TP/ffmpeg-9.1/.netcast-patched"
+  fi
+  # The TV has no OpenSSL 3 / new zlib: a -L dir holding only the static archives makes -lssl etc. link statically.
+  local S=$SYSROOT L=$TP/ffmpeg-staticlibs
+  mkdir -p "$L" && for a in ssl crypto z bz2; do ln -sf "$S/usr/lib/lib$a.a" "$L/lib$a.a"; done
+  rm -rf "$TP/ffmpeg-build" && mkdir "$TP/ffmpeg-build"
+  (cd "$TP/ffmpeg-build" && PKG_CONFIG_LIBDIR=$P/lib/pkgconfig PKG_CONFIG_SYSROOT_DIR=/ \
+     "$TP/ffmpeg-9.1/configure" --prefix="$TP/ffmpeg-netcast" --enable-cross-compile --cross-prefix="$X" \
+     --arch=arm --cpu=cortex-a9 --target-os=linux --sysroot="$S" --pkg-config="$SDK/bin/pkg-config" --pkg-config-flags=--static \
+     --enable-static --disable-shared --disable-doc --enable-version3 \
+     --enable-ffplay --enable-ffprobe --enable-ffmpeg --enable-sdl2 --enable-openssl --enable-zlib --enable-bzlib \
+     --enable-neon --enable-vfp --enable-runtime-cpudetect \
+     --disable-xlib --disable-libxcb --disable-vaapi --disable-vdpau --disable-vulkan --disable-v4l2-m2m \
+     --disable-alsa --disable-sndio --disable-indev=v4l2,fbdev,oss --disable-outdevs --disable-iconv \
+     --disable-encoders --enable-encoder=wrapped_avframe,rawvideo,pcm_s16le --disable-muxers --enable-muxer=null,wav \
+     --extra-cflags=-DNETCAST --extra-ldflags="-L$L -static-libgcc" --extra-libs="-ldl -lpthread -lm -lrt" > configure.log 2>&1 \
+     || { tail -30 configure.log; tail -40 ffbuild/config.log; exit 1; }
+   grep -qx 'CONFIG_FFPLAY=yes' ffbuild/config.mak || { echo "ffplay disabled (SDL2 not found?)" >&2; exit 1; }
+   make -j"$J" > build.log 2>&1 || { grep -E "error|undefined" build.log | head -20; exit 1; })
+  mkdir -p "$OUT/ffmpeg"
+  for b in ffplay ffprobe ffmpeg; do "${X}strip" -o "$OUT/ffmpeg/$b" "$TP/ffmpeg-build/$b"; done
+}
+
+step_netsurf() {  # NetSurf 3.11 framebuffer browser on SDL2 (libnsfb SDL2 surface, remote-driven pointer)
+  log "NetSurf 3.11 (+ libpng 1.6.59, libjpeg-turbo 3.2.1)"
+  fetch https://download.netsurf-browser.org/netsurf/releases/source-full/netsurf-all-3.11.tar.gz \
+        netsurf-all-3.11.tar.gz 4dea880ff3c2f698bfd62c982b259340f9abcd7f67e6c8eb2b32c61f71644b7b
+  fetch https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz libpng-1.6.59.tar.xz \
+        d80dd2a38a37f803cb9b6ac7b14bd6e74ddc3b654780a8380bdf93523fdb4389
+  fetch https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.1/libjpeg-turbo-3.2.1.tar.gz \
+        libjpeg-turbo-3.2.1.tar.gz c27ad72a68da151177929aa969ae773a2da5ac2af9ce946079314fdac8cece7f
+  unpack netsurf-all-3.11.tar.gz netsurf-all-3.11
+  unpack libpng-1.6.59.tar.xz libpng-1.6.59
+  unpack libjpeg-turbo-3.2.1.tar.gz libjpeg-turbo-3.2.1
+  local NS=$TP/netsurf-all-3.11 D=$TP/netsurf-deps H=$TP/netsurf-hostdeps S=$SYSROOT PC=$TP/netsurf-deps/pc
+  if [ ! -f "$NS/.netcast-patched" ]; then
+    patch -d "$NS" -p1 < "$TP/patches/netsurf-3.11-netcast.patch" && touch "$NS/.netcast-patched"
+  fi
+  # target image libraries (static)
+  cmake_build png-build libpng-1.6.59 -DCMAKE_INSTALL_PREFIX="$D" -DCMAKE_INSTALL_LIBDIR=lib \
+    -DPNG_SHARED=OFF -DPNG_STATIC=ON -DPNG_TESTS=OFF -DPNG_TOOLS=OFF -DPNG_FRAMEWORK=OFF \
+    -DZLIB_LIBRARY="$S/usr/lib/libz.a" -DZLIB_INCLUDE_DIR="$S/usr/include"
+  make -C "$TP/png-build" install > /dev/null
+  cmake_build jpeg-build libjpeg-turbo-3.2.1 -DCMAKE_INSTALL_PREFIX="$D" -DCMAKE_INSTALL_LIBDIR=lib \
+    -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF
+  make -C "$TP/jpeg-build" install > /dev/null
+  # host libpng for NetSurf's build-time convert_image tool (the host has no libpng-dev)
+  rm -rf "$TP/png-host-build" && mkdir "$TP/png-host-build"
+  (cd "$TP/png-host-build" && "$CM" "$TP/libpng-1.6.59" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$H" \
+     -DCMAKE_INSTALL_LIBDIR=lib -DPNG_SHARED=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF > cmake.log 2>&1 \
+   && make -j"$J" install > build.log 2>&1) || { tail -20 "$TP/png-host-build/build.log"; exit 1; }
+  # pkg-config files with full static-archive paths: the TV has none of these libraries (or older ones)
+  mkdir -p "$PC"
+  pcf() { printf 'Name: %s\nDescription: %s\nVersion: %s\nCflags: %s\nLibs: %s\n' "$1" "$1" "$2" "$3" "$4" > "$PC/$1.pc"; }
+  # NetSurf adds -lm/-lz early in LDFLAGS but the static archives come late, so wrap each set of static
+  # libraries in a linker group: circular refs (libpng<->libm/libz, curl<->ssl<->crypto<->z) resolve either way.
+  grp() { echo "-Wl,--start-group $* -Wl,--end-group"; }
+  local SSL="$S/usr/lib/libssl.a $S/usr/lib/libcrypto.a -ldl -lpthread"
+  pcf libcurl 8.0.0 "-I$S/usr/include" "$(grp "$S/usr/lib/libcurl.a $SSL $S/usr/lib/libz.a $S/lib/libatomic.a -lm")"
+  pcf openssl 3.0.0 "-I$S/usr/include" "$(grp "$SSL")"
+  pcf expat 2.5.0 "-I$S/usr/include" "$S/usr/lib/libexpat.a"
+  pcf zlib 1.3.0 "-I$S/usr/include" "$S/usr/lib/libz.a"
+  pcf freetype2 26.0.0 "-I$S/usr/include/freetype2" "$(grp "$S/usr/lib/libfreetype.a $S/usr/lib/libbz2.a $S/usr/lib/libz.a -lm")"
+  pcf libpng 1.6.59 "-I$D/include" "$(grp "$D/lib/libpng16.a $S/usr/lib/libz.a -lm")"
+  pcf sdl2 2.32.10 "-I$P/include/SDL2 -D_REENTRANT" "$P/lib/libSDL2.a -ldl -lpthread -lm -lrt"
+  # the cross pkg-config sees only the files above plus NetSurf's own freshly installed libraries
+  local NSPC="env PKG_CONFIG_LIBDIR=$NS/inst-framebuffer/lib/pkgconfig:$PC PKG_CONFIG_SYSROOT_DIR= pkg-config"
+  cat > "$NS/netsurf/Makefile.config" <<EOF
+override NETSURF_FB_FRONTEND := sdl
+override NETSURF_FB_FONTLIB := freetype
+override NETSURF_USE_JPEGXL := NO
+override NETSURF_USE_WEBP := NO
+override NETSURF_USE_VIDEO := NO
+override NETSURF_USE_ROSPRITE := NO
+override NETSURF_FB_RESPATH := \$\${HOME}/.netsurf/:\$\${NETSURFRES}
+override NETSURF_FB_FONTPATH := \$\${NETSURFRES}/fonts
+CFLAGS += -I$D/include -O2
+LDFLAGS += -L$D/lib -static-libgcc
+EOF
+  # host pkg-config (pkgconf) is wrapped so both the libraries and netsurf find our .pc files;
+  # the cross compiler comes from the SDK, convert_image/nsgenbind are built with the host cc.
+  mkdir -p "$TP/netsurf-deps/bin"
+  printf '#!/bin/sh\nexec %s "$@"\n' "$NSPC" > "$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-pkg-config"
+  chmod +x "$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-pkg-config"
+  ln -sf "$SDK/bin/pkgconf" "$TP/netsurf-deps/bin/pkg-config"
+  # The SDK's arm-lgtv-*-gcc is a symlink to toolchain-wrapper (which dispatches on argv[0]); NetSurf's
+  # buildsystem realpath()s the compiler and runs it by that resolved name, so the wrapper no longer knows
+  # it's gcc and toolchain detection fails. Real-file shims (realpath resolves to themselves) call the SDK
+  # tools by their proper names.
+  for t in gcc g++ cpp ar ranlib strip nm as ld objcopy objdump; do
+    printf '#!/bin/sh\nexec "%sbin/arm-lgtv-linux-gnueabi-%s" "$@"\n' "$SDK/" "$t" > "$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-$t"
+    chmod +x "$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-$t"
+  done
+  # NetSurf's buildsystem calls plain `pkg-config` with PKG_CONFIG_PATH: LIBDIR must exclude host/sysroot .pc files
+  (cd "$NS" && export PATH="$TP/netsurf-deps/bin:$SDK/bin:$PATH" \
+     PKG_CONFIG_LIBDIR="$NS/inst-framebuffer/lib/pkgconfig:$PC" PKG_CONFIG_SYSROOT_DIR= &&
+   make -j"$J" TARGET=framebuffer HOST=arm-lgtv-linux-gnueabi BUILD=x86_64-linux-gnu \
+     HOST_CC=cc BUILD_CC=cc \
+     BUILD_LIBPNG_CFLAGS="-I$H/include" BUILD_LIBPNG_LDFLAGS="-Wl,--start-group -L$H/lib -lpng -lz -lm -Wl,--end-group" \
+     > "$TP/netsurf-build.log" 2>&1) \
+     || { grep -E "error|Error|undefined|failed" "$TP/netsurf-build.log" | head -30; exit 1; }
+  mkdir -p "$OUT/netsurf"
+  "${X}strip" -o "$OUT/netsurf/netsurf" "$NS/netsurf/nsfb"
+}
+
 step_kmod() {  # optional: vanilla 3.0.13 prepared with the TV's vermagic, then src/kmod (not loaded automatically)
   log "kernel modules (linux 3.0.13)"
   local K=$TP/kernel BL=armv7-eabihf--glibc--stable-2018.11-1
@@ -239,7 +351,7 @@ step_retroarch() {
   cp "$DL/240p-LICENSE.txt" "$T/LICENSE.txt"
 }
 
-STEPS="sdl2 mixer ttf smb2 vterm lvgl doom tyrian rdp retroarch"
+STEPS="sdl2 mixer ttf smb2 vterm lvgl doom tyrian rdp retroarch ffmpeg"
 [ $# -gt 0 ] && STEPS="$*"
 for s in $STEPS; do "step_$s"; done
 log "done: $STEPS"
