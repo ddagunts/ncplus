@@ -35,6 +35,11 @@ LG's own TV stack keeps running underneath (tuner, HDMI, picture processing, Wi-
 can return to it at any time. Everything lives on the USB stick: **nothing is written to the
 TV's internal flash**, and a power cycle restores the stock TV.
 
+> **No warranty, no responsibility for bricked TVs.** These TVs are easy to brick: a bad flash write, a
+> wrong service-menu setting or a kernel experiment can leave one permanently dead (secure boot burns an
+> eFuse on a signature failure). Everything here is provided as is, and you use it at your own risk.
+> Read [Safety](#safety) before you start.
+
 ## What it does with the TV
 
 | Area | What NetCast+ does | How |
@@ -46,6 +51,7 @@ TV's internal flash**, and a power cycle restores the stock TV.
 | **Screen saver** | Backlight off after N minutes without input; any key wakes it | `ncscreen saver` daemon |
 | **Stay awake** | Disables LG's Auto Off / No-signal / No-operation power-off timers | Patches LG's in-RAM settings copy (RAM only, never saved) |
 | **Resources** | Stops unneeded LG services (browsers, voice, Skype, DIAL...) | LG's own process-manager API |
+| **Wi-Fi** | Keeps the TV reachable (stock firmware drops off the network for ~5 min every ~20 min) | `ncnetkeep` ARP keep-alive: the Wi-Fi firmware never delivers broadcasts, so the router's ARP entry ages out |
 | **Video** | Hardware H.264/MPEG decode on the video plane, our UI composited on top | GStreamer 0.10 `playbin2` + MediaTek `mtkvideosink` |
 | **Userland** | Modern toolchain, Python, a shell environment | Buildroot (openlgtv buildroot-nc4) on LG's glibc; optional chroot image |
 | **Kernel** | Extra modules for the stock kernel (gamepads first) | Vanilla 3.0.13 built to the TV's exact vermagic (insmod pending a layout check) |
@@ -62,7 +68,7 @@ TV's internal flash**, and a power cycle restores the stock TV.
 | **Music** | FLAC (incl. 24-bit/96 kHz), MP3 and WAV with tags, cover art, playlist, seek, shuffle/repeat; plays from the stick or SMB |
 | **Player** | Hardware-decoded video (H.264/MPEG-2/MPEG-4; MP4, MKV, TS, FLV) from files, HTTP, RTSP or UDP streams, using the TV's own decoders |
 | **RetroArch** | RetroArch 1.22 (GLES2) with NES, SNES, Game Boy, GBA, Mega Drive and PlayStation cores |
-| **Settings** | LVGL 9 settings screen: screen saver, keep-awake, lite mode, screen off, system info |
+| **Settings** | LVGL 9 settings screen: screen saver, keep-awake, lite mode, Wi-Fi keep-alive, screen off, system info |
 | **Terminal** | libvterm terminal (USB keyboard) for the TV shell or the chroot userland |
 | **Remote Desktop** | FreeRDP 3 (SDL2 client) for Windows or xrdp desktops |
 | **QML Hello** | Qt 6 / QML on the TV through an `eglfs_netcast` platform plugin (in progress) |
@@ -116,8 +122,8 @@ Getting that root shell is model- and firmware-specific and is not covered here;
    ```
    (The stick shows up as `usb1` or `usb2` depending on the port.)
 
-`start.sh` switches LG's sleep timers off (in RAM), starts the screen saver and shows the
-launcher. Arrows move, OK launches, and **Back is back/menu**, and volume/mute work inside apps.
+`start.sh` switches LG's sleep timers off (in RAM), starts the screen saver and the Wi-Fi
+keep-alive, and shows the launcher. Arrows move, OK launches, and **Back is back/menu**, and volume/mute work inside apps.
 "Exit to TV" returns to LG's home screen.
 
 Tools on the stick (`netcast/tools/`):
@@ -127,6 +133,7 @@ ncscreen off --wake        # backlight off until any key is pressed
 ncscreen saver 20          # screen saver: dark after 20 min idle
 ncnosleep status|off       # LG power-off timers (RAM only)
 nclite stop|start|list     # stop / restart optional LG services
+ncnetkeep [-t 30] [-v]     # Wi-Fi keep-alive (start.sh runs it; NETKEEP=0 in netcast.conf turns it off)
 ```
 
 Developer tools (`make -C src out/<tool>`; not in the package):
@@ -183,9 +190,9 @@ file back. `make -C src deploy` uploads all apps.
 |---|---|
 | `src/libnc/` | the native runtime: HOA registration, window, EGL, input, text (FreeType), 2D helpers |
 | `src/apps/` | launcher, photos, player, music, network shares, settings, terminal, demos, `ncscreen`, `nclite`, `run-app.sh` |
-| `src/tools/` | `ncnosleep`, `nckey`, `evdump`, `ncdebug`, plus `peek`/`sniff` (ptrace helpers used for reverse engineering) |
+| `src/tools/` | `ncnosleep`, `ncnetkeep`, `nckey`, `evdump`, `ncdebug`, `wlq`/`pktlog` (Wi-Fi diagnostics), plus `peek`/`sniff` (ptrace helpers used for reverse engineering) |
 | `src/stubs/` | export lists of the TV's `libEGL`/`libGLESv2`, used to generate link stubs |
-| `src/kmod/` | kernel modules for the stock 3.0.13 kernel |
+| `src/kmod/` | kernel modules for the stock 3.0.13 kernel (`xpadone`, `nckexec` warm boot) |
 | `src/qml/` | QML apps (static Qt 6 + `eglfs_netcast`) |
 | `package/apps/` | per-app launch scripts, configs and `app.ini` files copied into the package |
 | `third_party/` | `build-deps.sh` (pinned versions + checksums), the SDL2 and qtbase patches, RetroArch/Qt build scripts, vendored stb, dr_libs and Khronos headers |
@@ -204,6 +211,12 @@ The TV's flash is treated as untouchable, because modifying it is believed to br
 - Changes to LG's behaviour (sleep timers, services, backlight) are **RAM-only** and reset on a
   power cycle. NetCast+ never calls LG's settings-save routine.
 - Firmware-specific tools verify LG's code before touching anything, and refuse on other builds.
+- **Never boot a different kernel unless the TV's debug level is DEBUG.** `nckexec.ko` can warm-boot
+  an unsigned kernel from RAM. On a TV in RELEASE (most retail sets; check with `ncdebug status`), a kernel
+  that misbehaves can end in U-Boot's signature-failure path at the next boot: a hang plus an eFuse burn,
+  with no serial console to recover. That bricks the TV permanently. DEBUG skips the eFuse burn and allows
+  UART break-in. `nckexec-fire.sh` refuses to run unless `ncdebug` reports DEBUG. Changing the level is a
+  write to the NVM EEPROM: read FINDINGS.md ("Debug level") first.
 - Known exception: one 1.9 KB crash log from an early development crash, written by LG's crash
   handler before our handlers took over. It was left in place, because deleting it would be a
   flash write too.
@@ -213,6 +226,9 @@ The TV's flash is treated as untouchable, because modifying it is believed to br
 Working on an LG NetCast 4.5 TV (software v04.03.10, May 2017): native GLES2 apps, SDL2 video and
 audio, Doom, Tyrian, Photos, RetroArch, the hardware video player, launcher, backlight control,
 screen saver and keep-awake.
+
+Wi-Fi: the TV no longer drops off the network every ~20 minutes (`ncnetkeep`, see FINDINGS.md
+"Wi-Fi drops").
 
 Kernel modules load on the stock kernel: `xpadone.ko` adds Xbox One/Series wired pads (Xbox 360 and PS3
 pads work out of the box). Gamepads navigate the launcher, Photos and the Player, and work in Doom.
@@ -226,7 +242,8 @@ Next:
 - Magic Remote pointer support.
 - More apps: ScummVM, a file browser, a lightweight browser.
 - A newer kernel (e.g. Sony's MT53xx 3.10 tree) is only a research item: LG's display, GPU,
-  audio and Wi-Fi drivers are binary modules tied to 3.0.13.
+  audio and Wi-Fi drivers are binary modules tied to 3.0.13. `nckexec.ko` can warm-boot a kernel from
+  RAM (tested with the stock kernel), but only try other kernels on a TV set to DEBUG (see [Safety](#safety)).
 
 ## Credits
 
@@ -248,4 +265,5 @@ they modify (zlib for SDL, LGPL-3.0/GPL for Qt). The vendored stb, dr_libs and K
 their own licenses. Bundled third-party programs keep theirs; the USB package lists them in
 `netcast/LICENSES/`.
 
-Not affiliated with LG Electronics. Use at your own risk.
+Not affiliated with LG Electronics. Provided as is, without warranty of any kind. The authors take no
+responsibility for bricked or damaged TVs: these TVs are easy to brick. Use at your own risk.
