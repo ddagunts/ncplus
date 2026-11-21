@@ -1129,3 +1129,45 @@ diff -ru a/netsurf/frontends/framebuffer/gui.c b/netsurf/frontends/framebuffer/g
  		case NSFB_KEY_DELETE:
  			browser_window_key_press(gw->bw, NS_KEY_DELETE_RIGHT);
  			break;
+@@ -2169,6 +2177,18 @@
+ 	.quit = gui_quit,
+ };
+ 
++#ifdef NETCAST
++#include <signal.h>
++#include <unistd.h>
++void nc_shutdown(void);	/* libnc, linked into SDL: unregister from LG's procmgr */
++static void netcast_exit_watchdog(int sig)
++{
++	(void)sig;
++	nc_shutdown();
++	_exit(124);
++}
++#endif
++
+ /**
+  * Entry point from OS.
+  *
+@@ -2270,6 +2290,11 @@
+ 	} else {
+ 		framebuffer_run();
+ 
++#ifdef NETCAST
++		/* LG's libraries (pulled in by libnc inside SDL) can hang teardown or exit() */
++		signal(SIGALRM, netcast_exit_watchdog);
++		alarm(5);
++#endif
+ 		browser_window_destroy(bw);
+ 	}
+ 
+@@ -2284,6 +2309,10 @@
+ 	/* finalise logging */
+ 	nslog_finalise();
+ 
++#ifdef NETCAST
++	fflush(NULL);
++	_exit(0);	/* skip LG library destructors, like libnc's nc_exit() */
++#endif
+ 	return 0;
+ }
+ 

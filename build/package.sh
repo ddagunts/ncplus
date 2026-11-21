@@ -75,6 +75,8 @@ D=$(cd "$(dirname "$0")" && pwd); N=$(cd "$D/../.." && pwd)
 . "$N/system/ncconf.sh"; ncconf_init
 C=$1
 if [ -z "$C" ]; then C=/tmp/nc-photos.conf; ncconf_section photos > "$C"; fi
+# test photos in netcast/test/: start the local server if the config (or a URL argument) points at it
+if grep -qs '127.0.0.1:8090' "$C" || [ "${C#*127.0.0.1:8090}" != "$C" ]; then sh "$N/tools/webtest.sh" start >/dev/null; fi
 exec sh "$D/../run-app.sh" "$D/photos" "$C"
 EOT
 cat > "$P/apps/photos/app.ini" <<'EOT'
@@ -112,6 +114,8 @@ D=$(cd "$(dirname "$0")" && pwd); N=$(cd "$D/../.." && pwd)
 . "$N/system/ncconf.sh"; ncconf_init
 C=$1
 if [ -z "$C" ]; then C=/tmp/nc-streams.conf; ncconf_section player > "$C"; fi
+# test videos in netcast/test/: start the local server if the config (or a URL argument) points at it
+if grep -qs '127.0.0.1:8090' "$C" || [ "${C#*127.0.0.1:8090}" != "$C" ]; then sh "$N/tools/webtest.sh" start >/dev/null; fi
 exec sh "$D/../run-app.sh" "$D/ncplay" "$C"
 EOT
 cat > "$P/apps/player/app.ini" <<'EOT'
@@ -121,6 +125,32 @@ exec=run.sh
 color=c0306a
 order=25
 EOT
+
+# --- ffplay (FFmpeg 9.1, software decode; no launcher tile: Network Shares opens videos in it with YELLOW) ---
+if [ -x "$OUT/ffmpeg/ffplay" ]; then   # third_party/build-deps.sh ffmpeg
+  mkdir -p "$P/apps/ffplay"
+  cp "$OUT/ffmpeg/ffplay" "$OUT/ffmpeg/ffprobe" "$P/apps/ffplay/"
+  [ "$WITH_DEV" = 1 ] && cp "$OUT/ffmpeg/ffmpeg" "$P/tools/"
+  cat > "$P/apps/ffplay/run.sh" <<'EOT'
+#!/bin/sh
+# ffplay <file or URL> [ffplay options]: software-decoded playback for what the hardware Player can't do.
+# Remote: OK pause, LEFT/RIGHT seek 10 s, UP/DOWN seek 1 min, CH+/CH- seek 10 min, BACK quit.
+D=$(cd "$(dirname "$0")" && pwd)
+[ $# -gt 0 ] || { echo "usage: run.sh <file or URL> [ffplay options]" >&2; exit 1; }
+exec sh "$D/../run-app.sh" "$D/ffplay" -fs -autoexit -loglevel warning "$@"
+EOT
+  cp "$TOP/third_party/ffmpeg-9.1/COPYING.LGPLv3" "$P/LICENSES/FFmpeg-LGPL-3.0.txt"
+fi
+
+# --- test folder: browser test pages + synthetic test media, served by tools/webtest.sh (127.0.0.1:8090) ---
+# The TV may have no internet; the example links in netcast.conf ([player], [photos]) point here.
+mkdir -p "$P/test"
+cp "$TOP/package/test/"* "$P/test/"
+cp "$TOP/package/tools/webtest.sh" "$P/tools/"
+"$TOP/build/make-testmedia.sh" "$OUT/testmedia" > /dev/null
+cp -r "$OUT/testmedia/video" "$OUT/testmedia/audio" "$OUT/testmedia/photos" "$P/test/"
+# every netcast.conf section with its examples (an existing netcast.conf is never overwritten)
+(N=$P NETCAST_CONF=$P/netcast.conf.example; . "$TOP/src/apps/ncconf.sh"; ncconf_init > /dev/null)
 
 # --- Settings (LVGL) ---
 mkdir -p "$P/apps/settings"
@@ -181,6 +211,28 @@ mkdir -p "$P/apps/rdp"
 cp "$OUT/rdp/sdl-freerdp" "$PKG/rdp/run.sh" "$PKG/rdp/app.ini" "$P/apps/rdp/"
 cp "$TOP/third_party/FreeRDP-3.33.1/LICENSE" "$P/LICENSES/FreeRDP-Apache-2.0.txt"
 cp "$TOP/third_party/SDL2_ttf-2.24.0/LICENSE.txt" "$P/LICENSES/SDL2_ttf-zlib.txt"
+
+# --- Web Browser (NetSurf 3.11 framebuffer frontend on SDL2), once built ---
+if [ -x "$OUT/netsurf/netsurf" ]; then   # third_party/build-deps.sh netsurf
+  NSR=$TOP/third_party/netsurf-all-3.11/netsurf/frontends/framebuffer/res
+  W=$P/apps/netsurf
+  mkdir -p "$W/res/fonts"
+  cp "$OUT/netsurf/netsurf" "$PKG/netsurf/run.sh" "$PKG/netsurf/app.ini" "$W/"
+  cp "$PKG/netsurf/Choices" "$W/res/"
+  # FAT has no symlinks: copy the targets (toolbar images and pointers are compiled into the binary)
+  for f in adblock.css default.css internal.css quirks.css favicon.png netsurf.png; do cp -L "$NSR/$f" "$W/res/"; done
+  for f in Messages welcome.html credits.html licence.html; do cp -L "$NSR/en/$f" "$W/res/"; done
+  for f in DejaVuSans DejaVuSans-Bold DejaVuSans-Oblique DejaVuSans-BoldOblique DejaVuSerif DejaVuSerif-Bold \
+           DejaVuSansMono DejaVuSansMono-Bold; do
+    cp "/usr/share/fonts/truetype/dejavu/$f.ttf" "$W/res/fonts/"
+  done
+  cp /etc/ssl/certs/ca-certificates.crt "$W/res/ca-bundle.crt"   # the TV has no CA store for HTTPS
+  cp -L "$NSR/netsurf.png" "$P/test/"
+  cp "$TOP/third_party/netsurf-all-3.11/netsurf/COPYING" "$P/LICENSES/NetSurf-GPL-2.0.txt"
+  cp "$TOP/third_party/netsurf-all-3.11/libnsfb/COPYING" "$P/LICENSES/NetSurf-libraries-MIT.txt"
+  cp "$TOP/third_party/libpng-1.6.59/LICENSE" "$P/LICENSES/libpng.txt"
+  cp "$TOP/third_party/libjpeg-turbo-3.2.1/LICENSE.md" "$P/LICENSES/libjpeg-turbo.md"
+fi
 
 # --- QML Hello (static Qt 6.12 + eglfs_netcast), once built ---
 if [ -x "$OUT/qmlhello/qmlhello" ]; then
@@ -342,6 +394,15 @@ Use
   Network Shares: add servers to the [shares] section of netcast.conf (smb://user:password@host/share).
         OK on music opens Music, on photos opens Photos, on a video opens the Player;
         you come back to the same folder afterwards. RED plays all music in a folder.
+  Network Shares: YELLOW on a video plays it with ffplay (software decoding) instead of the hardware
+        Player, for codecs/containers the TV can't decode. ffplay: OK pause, LEFT/RIGHT seek, BACK quit.
+  Web Browser: NetSurf. Arrows move the pointer, OK clicks, push against the top/bottom edge to scroll,
+        BACK goes back a page (quits on the first). GREEN switches to text mode for a USB keyboard;
+        the keyboard button in the toolbar opens an on-screen keyboard. Start page: home= in [browser];
+        without one it opens the local test pages (tools/webtest.sh), since the TV may have no internet.
+  Test media: netcast/test/ has synthetic clips (H.264/MP3 TS for the Player; MP4, MPEG-2, VP9 for ffplay),
+        music (FLAC/MP3/WAV with tags and cover) and test photos. A new netcast.conf links to them in
+        [player] and [photos]; netcast.conf.example in this folder shows every section with examples.
   Music: FLAC/MP3/WAV from the stick or shares. OK play/pause, LEFT/RIGHT seek, CH+ next,
         RED previous, GREEN screen off (keeps playing), YELLOW shuffle, BLUE repeat.
   Doom: BACK menu, CH- quit (OK to confirm), OK fire / select, CH+ use, arrows move, RED/GREEN strafe,
@@ -357,6 +418,8 @@ Tools (in tools/, started automatically by start.sh where noted)
   ncscreen on|off         backlight via LG's MICOM; "off --wake" until a key is pressed
   ncscreen saver [min]    screen saver daemon (start.sh: 20 min, set NETCAST_SAVER_MIN)
   nclite stop|start|list  stop/restart optional LG services (browsers, voice, Skype...) for RAM
+  webtest.sh start|stop   local test web server (BusyBox httpd, 127.0.0.1:8090) for netcast/test/;
+                          Player, Photos and the Web Browser start it when netcast.conf points at it
 
 Developer extras (left out with build/package.sh --no-dev)
   sh enter.sh             chroot into the userland image netcast-root.ext4 (Python, GCC, ...) if it is in
@@ -419,6 +482,12 @@ Bundled components:
   dr_flac / dr_mp3 / dr_wav (public domain or MIT-0) - https://github.com/mackron/dr_libs
   SDL2_ttf 2.24.0 (zlib), DejaVu fonts (Bitstream Vera / public domain), LVGL 9.6 (MIT), libvterm 0.3.3 (MIT),
     FreeRDP 3.33.1 (Apache-2.0)
+  FFmpeg 9.1 (LGPL-3.0, statically linked into ffplay/ffprobe/ffmpeg; the build recipe and the ffplay patch
+    are in third_party/ of the NetCast+ tree) - https://ffmpeg.org
+  NetSurf 3.11 (GPL-2.0) with its libraries libcss, libdom, hubbub, libnsfb, ... (MIT) -
+    https://www.netsurf-browser.org ; libpng 1.6.59 (libpng license), libjpeg-turbo 3.2.1 (IJG/BSD),
+    and the SDK's libcurl (curl license), OpenSSL (Apache-2.0), FreeType, expat (MIT), zlib (zlib), all static.
+    ca-bundle.crt: Mozilla's CA list (MPL-2.0), from Debian's ca-certificates.
   Tyrian 2.1 data: freeware release by its author, fetched from https://camanis.net/tyrian/tyrian21.zip
     (as OpenTyrian's get_data.sh does). The zip still carries the original 1995 EULA; check before
     redistributing a package that contains it.

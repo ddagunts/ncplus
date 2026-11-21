@@ -6,9 +6,10 @@
  * An entry without a share lists the server's shares.
  *
  * Remote: UP/DOWN move, CH+ page down, OK/RIGHT open, LEFT/BACK go up (BACK at the top quits),
- *         RED play all music in this folder, GREEN refresh.
+ *         RED play all music in this folder, GREEN refresh, YELLOW play a video with ffplay.
  * Opening a file hands it to another NetCast+ app and comes back here afterwards:
  *   music (FLAC/MP3/WAV) -> Music, photos -> Photos (this folder), video -> Player (hardware decode).
+ *   YELLOW on a video plays it with ffplay instead (software decode: codecs/containers the hardware can't do).
  * Those apps read SMB files through smbgw, a read-only HTTP gateway on 127.0.0.1:8445.
  */
 #define _GNU_SOURCE
@@ -159,7 +160,7 @@ static void draw(const char *overlay) {
     if (!nents && !overlay) ui_text(cur.kind == LOC_ROOT ? "No shares configured" : "Empty folder", 640, 300, 28, 0, dim, 0, UI_CENTER);
     if (overlay) ui_text(overlay, 640, 300, 28, 1, ui_rgb(0x4fc3f7), 1100, UI_CENTER);
     if (status[0]) ui_text(status, 60, 622, 20, 0, ui_rgb(0xffb74d), 1160, UI_LEFT);
-    ui_text("OK open   \xE2\x97\x80 / BACK up   CH+/CH- page   RED play folder   GREEN refresh", 640, 680, 18, 0, dim, 1200, UI_CENTER);
+    ui_text("OK open   \xE2\x97\x80 / BACK up   CH+/CH- page   RED play folder   GREEN refresh   YELLOW ffplay", 640, 680, 18, 0, dim, 1200, UI_CENTER);
     ui_present();
 }
 
@@ -399,9 +400,21 @@ static int play_music(int from) {
     return chain(full);
 }
 
+static int play_video(int i, const char *player) {   /* player: "player" (hardware) or "ffplay" */
+    char app[1300], q[1500], arg[13000], qa[13500], full[16000];
+    if (cur.kind == LOC_SMB && ensure_gw() != 0) return -1;
+    item_src(ents[i].name, 1, arg, sizeof arg);
+    snprintf(app, sizeof app, "%s/apps/%s/run.sh", netcast, player);
+    if (access(app, R_OK) != 0) { snprintf(status, sizeof status, "%s is not installed", player); return -1; }
+    shq(app, q, sizeof q);
+    shq(arg, qa, sizeof qa);
+    snprintf(full, sizeof full, "sh %s %s", q, qa);
+    return chain(full);
+}
+
 static int open_file(int i) {
     ent *e = &ents[i];
-    char app[1300], q[1500], arg[13000], qa[13500], full[16000];
+    char app[1300], q[1500], full[16000];
     switch (e->type) {
     case T_AUDIO: return play_music(i);
     case T_IMAGE: {
@@ -418,13 +431,7 @@ static int open_file(int i) {
         return chain(full);
     }
     case T_VIDEO:
-        if (cur.kind == LOC_SMB && ensure_gw() != 0) return -1;
-        item_src(e->name, 1, arg, sizeof arg);
-        snprintf(app, sizeof app, "%s/apps/player/run.sh", netcast);
-        shq(app, q, sizeof q);
-        shq(arg, qa, sizeof qa);
-        snprintf(full, sizeof full, "sh %s %s", q, qa);
-        return chain(full);
+        return play_video(i, "player");
     default:
         snprintf(status, sizeof status, "No app for %s", e->name);
         return -1;
@@ -473,6 +480,10 @@ int main(int argc, char **argv) {
             case SDL_SCANCODE_LEFT: case SDL_SCANCODE_BACKSPACE: go_up(); break;
             case SDL_SCANCODE_ESCAPE: if (!go_up()) goto out; break;
             case SDL_SCANCODE_F1: if (play_music(-1) == 0) handed_off = 1; break;
+            case SDL_SCANCODE_F3:
+                if (nents && ents[sel].type == T_VIDEO && play_video(sel, "ffplay") == 0) handed_off = 1;
+                else if (nents && ents[sel].type != T_VIDEO) snprintf(status, sizeof status, "YELLOW plays videos with ffplay");
+                break;
             case SDL_SCANCODE_F2:
                 nshares = smb_load_conf(conf, shares, 64);
                 if (ctx) { smb2_destroy_context(ctx); ctx = NULL; }

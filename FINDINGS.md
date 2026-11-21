@@ -305,6 +305,44 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
 - VLC/mplayer would decode in software on 2x A9: fine for audio and SD, not for HD H.264. The hardware path is the
   one to use.
 
+## ffplay, Web Browser (NetSurf) and the test folder (2026-11-20)
+
+- **ffplay** (FFmpeg 9.1, `build-deps.sh ffmpeg`): static except glibc, NEON software decode, GLES2 output through
+  SDL. It handles what the hardware Player can't (VP9, HEVC, Opus, AAC in MP4). It has no launcher tile:
+  Network Shares opens a video with YELLOW (`apps/ffplay/run.sh <file|URL>`), and OK still opens the hardware Player.
+- **NetSurf 3.11** (`build-deps.sh netsurf`, framebuffer frontend on our SDL2 libnsfb surface). Build gotchas:
+  the browser's own Makefile ignores `HOST` and only takes `CC`; without it the framebuffer frontend falls back to
+  the host `cc` and links x86 objects. `NETSURF_CONFIG="CC=… CXX=…"` passes them to that sub-make only. NetSurf
+  adds plain `-lz -lexpat`, and the TV has zlib 1.2.3 (no `ZLIB_1.2.3.4` symbols) and no expat, so the static
+  archives are linked in from a `-L` dir that holds no `.so`. Result: needs only glibc ≤ 2.10.
+- **NetSurf runtime:** `--option=value` arguments are only parsed *before* all others (`-w`, `-h`, URL).
+  `NETSURFRES` = `apps/netsurf/res` (Messages, CSS, DejaVu fonts, `Choices`); toolbar images are compiled in.
+  HTTPS needs `--ca_bundle` (the TV has no CA store; the package ships Debian's bundle). The "undefined
+  instruction" lines in dmesg at startup are OpenSSL probing CPU features (SIGILL is caught), not a crash.
+  Exit: a 5 s watchdog plus `_exit()` after teardown, like ffplay, because LG's destructors can hang.
+- **No internet on the TV**, and DNS is broken too (the 127.0.0.1 resolver isn't listening, at least after the
+  warm boot). `tools/webtest.sh` runs the static BusyBox `httpd` on 127.0.0.1:8090 over `netcast/test/`
+  (browser test pages, synthetic media from `build/make-testmedia.sh`, test photos with a static index, since
+  BusyBox httpd has no directory listing). It writes `/tmp/webtest.conf` with MIME types; without it, `.mp4` and
+  `.mkv` are served as `text/html`. Range requests work (206). Player, Photos and the Web Browser start it when
+  netcast.conf (or a URL argument) points at 127.0.0.1:8090.
+- **Hardware decode, measured on the TV** (`gst-launch-0.10 playbin2` with `mtkvideosink`/`mtkaudiosink`,
+  and ncplay): **H.264 (Main or High) + MP3 in MPEG-TS plays cleanly.** H.264 + AAC in TS plays video only
+  ("Missing element: MPEG-4 AAC decoder"); MPEG-2 video: "Missing element: MPEG-2 Video decoder"; H.264 + AC-3
+  in TS and MPEG-2 + AC-3: data-flow/not-negotiated errors; **any MP4, even H.264 with no audio, fails in
+  qtdemux**. This contradicts the element list above (omx_mpeg2dec, omx_aacdec, omx_ac3dec exist): they don't
+  link in this setup. The hardware test clip is therefore H.264 + MP3 TS; everything else goes to ffplay.
+- **ffplay, measured:** VP9 + Opus 360p30 in sync (A-V within ±0.02 s), 33/450 frames dropped; HEVC 360p30 in
+  sync but 238/450 dropped (too slow, so no HEVC test clip). Music plays FLAC/MP3/WAV via mtkaudiosink 44.1 kHz.
+- **procmgr slots leak (the cause of "RegisterService failed"):** `HOA_PROC_UnregisterService` sends one bus
+  request with our pid; procmgr never answers it (rc=-1, even as the first teardown step, while other procmgr
+  queries on the same connection succeed). `HOA_PROC_GetRunningProcessCount` grows by one per app run and
+  never drops (32, 34, 35, ...; `NotifyAppTermination` doesn't help). After roughly a dozen launches (each
+  return to the launcher counts) registration fails for every name and NetCast+ exits; only a power cycle
+  clears it. libnc has `NC_PM_DEBUG=1` (logs the count) and `NC_PM_NOTIFY=1` (experiment) for this. Not fixed.
+- Tested on the TV (cold boot, user watching): the Web Browser renders the test pages (CSS, PNG, links,
+  scrolling, Back) and ffplay plays the software test clips; the user signed both off.
+
 ## RetroArch (2026-11-20)
 
 - RetroArch v1.22.2: `--enable-opengles --disable-opengles3 --enable-sdl2 --enable-egl`. Video `gl` plus context
@@ -569,7 +607,7 @@ read back word-by-word with `/sbin/devmem <addr> 32` over telnet. Non-zero words
 
 ```
 0xf0008664: 0x70180004   full-verify OTP  (bit0 = 0)
-0xf0008670: 0x6FFE01F7   word Lmain reads ~29×
+0xf0008670: 0x6FFE01F7   SKU feature fuse word (NOT secure boot — see below)
 0xf0008674: 0x00555653   "SVU" (ASCII, LE)
 0xf0008688: 0x00001404
 0xf000868c: 0xE11D07D8
@@ -580,14 +618,36 @@ read back word-by-word with `/sbin/devmem <addr> 32` over telnet. Non-zero words
 - **Firm result: the permanent full-verify latch is NOT set.** `0xf0008664` = `0x70180004`, bit0 = 0. This TV has
   not been tripped into the always-RSA-verify / brick state, which is consistent with it booting normally and with
   `verify=n` in the U-Boot env. So the *catastrophic* OTP outcome from a failed image check has not happened here.
-- **The SBC (secure-boot enable) question is still open, but the data leans "enforced."** The bank is overwhelmingly
-  zero; `0xf0008670` = `0x6FFE01F7` is the one word Lmain reads ~29× in its `secure boot ok/fail` path, and it has
-  many bits set. We have not proven which bit is the MediaTek SBC fuse (that still needs the Lmain switch traced,
-  per above), so this is **not** a green light — a set, heavily-referenced control word in the verify path is at
-  least as consistent with secure boot being *on* as off. Do not read "full-verify latch clear" as "SBC unblown";
-  they are different fuses.
 - This is the live MMIO read-back of the OTP — the same source Lmain/U-Boot read — not the bootloader *image*
   (that is p1 in `tv_dump`, never to be rewritten per [[flash-secureboot]]/[[tv-no-flash-writes]]).
+
+**Lmain fuse-decode trace (2026-11-21, static RE of the decompressed `lmain.bin`, `tools/unlzhs.py` offset
+`0xa040`; capstone Thumb). This CORRECTS the earlier "`0xf0008670` is the secure-boot word" guess:**
+
+- **`0xf0008670` is the SKU *feature* fuse word, not secure boot.** Its "29 references" are 28 auto-generated
+  per-bit accessor functions (28-byte blocks at `0xd0da5c`+, each `ubfx r0, [0xf0008670], #bit, #1`, descending
+  from bit 28). The fuse-dump routine at `0xd1a1f4` prints them by name — `IS_SupportDOLBY`, `DTS`, `VC1`,
+  `DivXHD`, `3DGPU`, `HBBTV`, `MHP`, `GINGA`, `ARIB`, `JVM`, `OPERA`, `MHEGHD`, `CPU1G`, `RM`, `AVS` (strings at
+  `0xd460df`+). Pure codec/middleware licensing bits.
+- **There is no secure-boot *enable* fuse that Lmain reads.** A token sweep of Lmain's whole string table
+  (`secure`, `SBC`, `authenticate`, `verify`, `fuse`, `RSA`, `signature`, `trust`) returns only `secure boot ok`
+  / `secure boot fail` (va `0xd44c5b`/`0xd44c49`) and `MT5398 Boot Loader`. Every named fuse accessor is an
+  `IS_Support*` feature bit; **no `IS_SecureBoot`/`IS_SBC`/auth accessor exists.**
+- **Lmain verifies its next stage unconditionally.** The verify wrapper at `0xd13980` calls the crypto routine
+  `0xd2dec8`, branches to "secure boot ok"/"secure boot fail" (fail → returns 2), and only then drives the
+  hardware **LZHS decompressor** (regs `0xf00080b0/b4`, `0xf00081d0`; strings "LZHS start/done", "decode checksum
+  is not the same"). The `0xf0008000`–`0x81ff` block is the **eFuse/crypto controller** (command/data/status at
+  `+0x00/04/1c/34/74/78`), not enable bits. Authentication is not gated behind a readable fuse the way features
+  are.
+- **Conclusion: the chain's secure-boot on/off switch is not in Lmain** — Lmain always authenticates U-Boot. The
+  enable/bypass decision lives in the **mask BootROM** (whether it enforces p1's `0x9c00` signature over Lmain),
+  which is not in flash and not symbolically present here. So the SBC question cannot be answered by reading a
+  single fuse; the only named enforcement fuse in reach is the full-verify OTP `0xf0008664` bit0 (= 0, read above),
+  which controls partial-vs-full signature checking + the burn-on-fail latch, *not* "is secure boot enforced."
+- **For debugging, this changes nothing actionable:** the reversible levers stay the EEPROM debug level
+  ([[tv-debug-level]]) and `nckexec` ([[nckexec-warm-boot]]); a definitive BROM dump needs MTK BROM download mode
+  on a sacrificial unit with hardware access, not `/dev/mem` on this TV (the `0xf00080xx` controller space returns
+  erroring/side-effecting reads when probed live).
 
 ### Image signatures
 

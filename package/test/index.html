@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NetCast+ browser test</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>NetCast+ browser test</h1>
+<p class="lead">This page is served by <code>tools/webtest.sh</code> (BusyBox httpd on 127.0.0.1:8090)
+from <code>netcast/test/</code> on the USB stick. If you can read it, the browser works.</p>
+
+<h2>Checks</h2>
+<table>
+<tr><th>What</th><th>Expected</th></tr>
+<tr><td>CSS</td><td>blue headings, this table with stripes</td></tr>
+<tr><td>Image (PNG)</td><td>the NetSurf logo below</td></tr>
+<tr><td>Text</td><td><b>bold</b>, <i>italic</i>, <code>monospace</code>, äöü ñ é ß €</td></tr>
+<tr><td>Link + BACK</td><td>open page 2, then BACK returns here</td></tr>
+<tr><td>Form</td><td>OK on the text box, then type (USB keyboard or the on-screen keyboard)</td></tr>
+</table>
+
+<p><img src="netsurf.png" alt="NetSurf logo"></p>
+
+<p><a href="page2.html">Open page 2 &rarr;</a></p>
+
+<form action="form.html" method="get">
+<p>Text box: <input type="text" name="q" size="30" value=""> <input type="submit" value="Send"></p>
+</form>
+
+<h2>Test media</h2>
+<p>Synthetic clips with a running clock and a beep every second (check A/V sync). The same files are on the
+USB stick in <code>netcast/test/</code>: open them from Network Shares (OK = hardware Player, YELLOW = ffplay),
+and the Music app finds the audio files. netcast.conf has example links to them in [player] and [photos].</p>
+<table>
+<tr><th>File</th><th>Plays in</th></tr>
+<tr><td><a href="video/test-h264-mp3-720p.ts">video/test-h264-mp3-720p.ts</a></td><td>Player (hardware): H.264 + MP3 in MPEG-TS</td></tr>
+<tr><td><a href="video/test-h264-aac-480p.mp4">video/test-h264-aac-480p.mp4</a></td><td>ffplay (software): H.264 + AAC MP4</td></tr>
+<tr><td><a href="video/test-mpeg2-ac3-576p.ts">video/test-mpeg2-ac3-576p.ts</a></td><td>ffplay (software): MPEG-2 + AC-3</td></tr>
+<tr><td><a href="video/test-vp9-opus-360p.mkv">video/test-vp9-opus-360p.mkv</a></td><td>ffplay (software): VP9 + Opus</td></tr>
+<tr><td><a href="audio/01-arpeggio.flac">audio/01-arpeggio.flac</a></td><td>Music: FLAC with tags and cover</td></tr>
+<tr><td><a href="audio/02-arpeggio.mp3">audio/02-arpeggio.mp3</a></td><td>Music: MP3 with ID3 tags and cover</td></tr>
+<tr><td><a href="audio/03-beeps.wav">audio/03-beeps.wav</a></td><td>Music: WAV</td></tr>
+<tr><td><a href="photos/">photos/</a></td><td>Photos: test patterns</td></tr>
+</table>
+
+<h2>Scrolling</h2>
+<p>Push the pointer against the bottom edge of the screen to scroll down.</p>
+<ol>
+<li>one</li><li>two</li><li>three</li><li>four</li><li>five</li><li>six</li><li>seven</li><li>eight</li>
+<li>nine</li><li>ten</li><li>eleven</li><li>twelve</li><li>thirteen</li><li>fourteen</li><li>fifteen</li>
+</ol>
+<p id="end">End of page.</p>
+</body>
+</html>

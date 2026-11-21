@@ -217,6 +217,9 @@ step_netsurf() {  # NetSurf 3.11 framebuffer browser on SDL2 (libnsfb SDL2 surfa
   cmake_build jpeg-build libjpeg-turbo-3.2.1 -DCMAKE_INSTALL_PREFIX="$D" -DCMAKE_INSTALL_LIBDIR=lib \
     -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF
   make -C "$TP/jpeg-build" install > /dev/null
+  # NetSurf adds plain -lz/-lexpat; the TV has zlib 1.2.3 (no ZLIB_1.2.3.4 symbols) and no expat, so put the
+  # static archives in a -L dir with no .so: the linker then picks them over the sysroot's shared ones.
+  ln -sf "$S/usr/lib/libz.a" "$S/usr/lib/libexpat.a" "$D/lib/"
   # host libpng for NetSurf's build-time convert_image tool (the host has no libpng-dev)
   rm -rf "$TP/png-host-build" && mkdir "$TP/png-host-build"
   (cd "$TP/png-host-build" && "$CM" "$TP/libpng-1.6.59" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$H" \
@@ -247,7 +250,7 @@ override NETSURF_USE_VIDEO := NO
 override NETSURF_USE_ROSPRITE := NO
 override NETSURF_FB_RESPATH := \$\${HOME}/.netsurf/:\$\${NETSURFRES}
 override NETSURF_FB_FONTPATH := \$\${NETSURFRES}/fonts
-CFLAGS += -I$D/include -O2
+CFLAGS += -I$D/include -O2 -DNETCAST
 LDFLAGS += -L$D/lib -static-libgcc
 EOF
   # host pkg-config (pkgconf) is wrapped so both the libraries and netsurf find our .pc files;
@@ -264,11 +267,15 @@ EOF
     printf '#!/bin/sh\nexec "%sbin/arm-lgtv-linux-gnueabi-%s" "$@"\n' "$SDK/" "$t" > "$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-$t"
     chmod +x "$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-$t"
   done
-  # NetSurf's buildsystem calls plain `pkg-config` with PKG_CONFIG_PATH: LIBDIR must exclude host/sysroot .pc files
+  # NetSurf's buildsystem calls plain `pkg-config` with PKG_CONFIG_PATH: LIBDIR must exclude host/sysroot .pc files.
+  # The libraries get the cross compiler from HOST, but the browser's own Makefile only takes CC (its framebuffer
+  # frontend otherwise falls back to the host `cc`), so CC/CXX go to that sub-make alone via NETSURF_CONFIG.
+  rm -f "$NS/inst-framebuffer/build-stamp" "$NS/netsurf/nsfb"   # else netsurf-all skips the (re)link
   (cd "$NS" && export PATH="$TP/netsurf-deps/bin:$SDK/bin:$PATH" \
      PKG_CONFIG_LIBDIR="$NS/inst-framebuffer/lib/pkgconfig:$PC" PKG_CONFIG_SYSROOT_DIR= &&
    make -j"$J" TARGET=framebuffer HOST=arm-lgtv-linux-gnueabi BUILD=x86_64-linux-gnu \
      HOST_CC=cc BUILD_CC=cc \
+     NETSURF_CONFIG="CC=$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-gcc CXX=$TP/netsurf-deps/bin/arm-lgtv-linux-gnueabi-g++" \
      BUILD_LIBPNG_CFLAGS="-I$H/include" BUILD_LIBPNG_LDFLAGS="-Wl,--start-group -L$H/lib -lpng -lz -lm -Wl,--end-group" \
      > "$TP/netsurf-build.log" 2>&1) \
      || { grep -E "error|Error|undefined|failed" "$TP/netsurf-build.log" | head -30; exit 1; }

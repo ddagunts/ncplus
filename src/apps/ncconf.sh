@@ -31,7 +31,11 @@ _ncconf_old() {
 }
 
 ncconf_init() {
-  [ -f "$NETCAST_CONF" ] && return 0
+  if [ -f "$NETCAST_CONF" ]; then
+    # sections added in later versions: append them (comments only) to an existing file
+    grep -qi '^[[:space:]]*\[browser\]' "$NETCAST_CONF" || { printf '\n'; _ncconf_browser; } >> "$NETCAST_CONF"
+    return 0
+  fi
   {
     cat <<'EOF'
 # NetCast+ settings: servers, URLs and options for all apps.
@@ -54,8 +58,10 @@ EOF
 #     cd ~/Pictures && python3 -m http.server 8000
 # then set (use the PC's LAN address):
 #   url=http://192.168.1.10:8000/
+# The line below shows the test photos in netcast/test/photos/ (tools/webtest.sh serves them).
 EOF
-    _ncconf_old "$N/apps/photos/photos.conf"
+    S=$(_ncconf_old "$N/apps/photos/photos.conf")
+    if [ -n "$S" ]; then echo "$S"; else echo 'url=http://127.0.0.1:8090/photos/'; fi
 
     cat <<'EOF'
 
@@ -65,9 +71,14 @@ EOF
 #   PC     = http://192.168.1.10:8000/stream.ts      (HTTP progressive MP4/MKV/TS)
 #   Camera = rtsp://192.168.1.20:554/live            (IP cameras, RTSP servers)
 #   Multicast = udp://239.0.0.1:1234                 (MPEG-TS, e.g. from VLC/ffmpeg)
-# Hardware decoding: H.264, MPEG-2, MPEG-4 video; AAC (ADTS/TS), MP3, AC-3 audio.
+# Hardware decoding: H.264 video with MP3 audio in MPEG-TS works reliably; MP4 files, AAC/AC-3 audio and
+# MPEG-2 video don't in this player. For those (and VP9 etc.): Network Shares, YELLOW = ffplay.
+# The test clips below are in netcast/test/video/ (tools/webtest.sh serves them).
 EOF
-    _ncconf_old "$N/apps/player/streams.conf"
+    S=$(_ncconf_old "$N/apps/player/streams.conf")
+    if [ -n "$S" ]; then echo "$S"; else
+      echo 'Test H.264 720p = http://127.0.0.1:8090/video/test-h264-mp3-720p.ts'
+    fi
 
     cat <<'EOF'
 
@@ -77,8 +88,12 @@ EOF
 # Leave out the share to list all shares of a server. No user = guest.
 # Escape special characters in the password: @ -> %40, : -> %3A, space -> %20, % -> %25
 # SMB2/3 servers only (Windows 7+, Samba 3.6+, any current NAS).
+# The USB stick is always listed too (its netcast/test/ folder has test videos and music).
 #   NAS music  = smb://me:secret@192.168.1.20/music
 #   Windows PC = smb://me:secret@192.168.1.30/
+#   Guest      = smb://192.168.1.20/public
+#   Movies     = smb://me:secret@nas.lan/media/Movies
+#   Work       = smb://CORP;me:secret@fileserver/home
 EOF
     _ncconf_old "$N/apps/smb/shares.conf"
 
@@ -91,5 +106,17 @@ EOF
 #   /v:myhost.lan:3389 /u:me /d:WORKGROUP /p:secret
 EOF
     _ncconf_old "$N/apps/rdp/rdp.conf" | head -1
+    echo
+    _ncconf_browser
   } > "$NETCAST_CONF.tmp" && mv "$NETCAST_CONF.tmp" "$NETCAST_CONF" && echo "ncconf: created $NETCAST_CONF"
+}
+
+_ncconf_browser() {
+  cat <<'EOF'
+[browser]
+# Web Browser start page. Without home= it opens the local test pages (tools/webtest.sh, netcast/test/),
+# since the TV may have no internet access.
+#   home=http://192.168.1.10:8000/
+#   home=https://www.netsurf-browser.org/
+EOF
 }
