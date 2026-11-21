@@ -18,7 +18,7 @@ LDFLAGS  := -static-libgcc -L $(STUBS) -Wl,--allow-shlib-undefined
 # the TV's libraries), so no LG files are needed to build.
 LIBS     := -lEGL -lGLESv2 -ldl -lpthread -lm -lrt
 
-APPS     := $(OUT)/ncmusic $(OUT)/ncsmb $(OUT)/smbgw $(OUT)/ncterm $(OUT)/ncsettings $(OUT)/ncplay $(OUT)/ncinput $(OUT)/nctext $(OUT)/ncres $(OUT)/sdldemo $(OUT)/launcher $(OUT)/photos $(OUT)/nclite $(OUT)/ncscreen $(OUT)/ncnosleep $(OUT)/peek $(OUT)/sniff
+APPS     := $(OUT)/ncmusic $(OUT)/ncsmb $(OUT)/smbgw $(OUT)/ncterm $(OUT)/ncsettings $(OUT)/ncplay $(OUT)/ncinput $(OUT)/nctext $(OUT)/ncres $(OUT)/sdldemo $(OUT)/launcher $(OUT)/photos $(OUT)/nclite $(OUT)/ncscreen $(OUT)/ncnosleep $(OUT)/peek $(OUT)/sniff $(OUT)/pktlog $(OUT)/wlq
 
 # Developer tools (packaged into netcast/tools/ by build/package.sh unless --no-dev)
 DEVTOOLS := $(OUT)/nckey $(OUT)/evdump $(OUT)/ncdebug
@@ -76,6 +76,12 @@ $(OUT)/peek: tools/peek.c
 
 $(OUT)/sniff: tools/sniff.c
 	$(CC) -O2 -static $< -o $@
+
+$(OUT)/pktlog: tools/pktlog.c
+	$(CC) -O2 -Wall -Wextra -static $< -o $@
+
+$(OUT)/wlq: tools/wlq.c
+	$(CC) -O2 -Wall -Wextra -static $< -o $@
 
 $(OUT)/ncscreen: apps/ncscreen.c
 	$(CC) -O2 -Wall -static $< -o $@
