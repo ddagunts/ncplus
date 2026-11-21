@@ -522,6 +522,73 @@ Thumb, base `0xd00000`, DRAM init) · `0x33480` `mt5398_LGE_linux` tag · LZHS a
 U-Boot env (p8): `autoboot=y`, `bootdelay=0`, `silent=y`, `verify=n`, `bootcmd=` (empty), no `watchdog=yes`.
 `verify=n` does not disable the signature checks below.
 
+### Preloader / BROM stage — where the chain of trust actually roots (2026-11-20)
+
+The RSA checks in `verify_apps` protect everything *above* U-Boot, but nothing in flash protects U-Boot, Lmain
+or the preloader themselves. Whether the whole chain can be bypassed comes down to one thing we cannot read from
+flash: does the MT5398 mask BootROM authenticate the first flash stage? What the dump does tell us:
+
+- **The flash-resident first stage is MediaTek's *non-secure* loader.** At `p1:0x100` is `MTK/DTV/ROMCODE/
+  MSDCBOOT/V01.00` → `Start Pmain`. Its entire message table (`0x4398`–`0x4410`) is integrity-only: `EMMC boot`,
+  `LZHS addr:`, `LZHS size:`, `LZHS checksum:`, `LZHS ok`/`LZHS failed`, and the mode banner **`not secure
+  loader`** (`0x43cc`). A scan of the whole 1 MB p1 for `efuse`/`secure boot`/`RSA`/`authenticate`/`sign`/`SBC`/
+  `OTP`/`public key` returns **only** the `secure loader` substring of that banner. So MSDCBOOT loads the next
+  stage (Lmain, the `X935` blob at `0xa000`) and checks a **checksum, not a signature**.
+- **p1 nonetheless carries its own signature structure** at `0x9c00` (magic `96 53 68 53`, a pointer `0xf000d3e4`
+  into SRAM, a `02` field, then ~0x300 bytes). A signature over the loader exists in flash, so *something* was
+  meant to verify it — and it is not MSDCBOOT (the non-secure loader) and not `verify_apps` (p1/boot.bin is **not**
+  in that list, see below). The only remaining verifier is the **in-SoC mask BootROM**, which is not in flash.
+- **Consequence.** If the BootROM does *not* enforce that signature — i.e. the MediaTek secure-boot (SBC) efuse is
+  unblown on this SKU, which the shipped *non-secure* MSDCBOOT strongly suggests — then a modified p1 (preloader →
+  Lmain → U-Boot) would boot, and that defeats the entire `verify_apps` RSA chain, because nothing above re-checks
+  the bootloader. If the SBC fuse *is* blown, it does not, and p1 cannot be altered. This is the single unknown
+  that decides whether a newer kernel/OS is loadable on this hardware.
+
+**Lmain decompressed (2026-11-20).** `tools/unlzhs.py` (a from-scratch LZHS decoder, Huffman+LZSS, ported from
+openlgtv epk2extract; reproduces Lmain `0x52800` and U-Boot `0x853e0` byte-exact) was used to decompress both stages
+for analysis. Findings in Lmain (Thumb, base `0xd00000`):
+
+- Lmain **does** chain-verify the next stage: a crypto/bignum routine (dispatch at `~0xd2de90`–`0xd2e06c`) feeds a
+  check that prints **`secure boot ok`** / **`secure boot fail`** (strings at va `0xd44c5b`/`0xd44c49`, decision code
+  near `0xd13980`). So LG's design authenticates stages *below* U-Boot too, not only `verify_apps`.
+- The efuse/OTP bank `0xf0008000` is referenced throughout Lmain, including the full-verify OTP `0xf0008664` that
+  U-Boot also reads. The exact bit that *enables/bypasses* secure boot (the MediaTek SBC fuse) has not been pinned
+  down by static disassembly yet — the verify path is a large switch and hand-tracing it reliably needs more work;
+  do not assume enforced or bypassed from the strings alone.
+
+**Non-destructive confirmation (read-only, safe):** read the efuse/OTP bank with `devmem` — the full-verify OTP at
+`0xf0008664` bit0 is already known-readable, and the surrounding words (`0xf0008660`–`0xf00086a0`, plus the
+`0xf0008670` block Lmain hits ~29×) are the place to look for the SBC enable bit. Reading fuses changes nothing.
+**Testing** a modified loader, by contrast, means writing the p1 boot partition: that violates [[tv-no-flash-writes]]
+and risks the exact brick + permanent-full-verify outcome, so it belongs on a sacrificial unit with a proven
+UART/JTAG recovery path, never on this TV. SHA-1 in the upper chain (below) is collision-weak but not a practical
+forgery path; whether the SBC fuse gates Lmain's (and the BROM's) verify is the real question.
+
+**devmem dump of the OTP/efuse bank (2026-11-20, read-only, this TV).** Physical `0xf0008600`–`0xf00086ff`
+read back word-by-word with `/sbin/devmem <addr> 32` over telnet. Non-zero words only (all others `0x00000000`):
+
+```
+0xf0008664: 0x70180004   full-verify OTP  (bit0 = 0)
+0xf0008670: 0x6FFE01F7   word Lmain reads ~29×
+0xf0008674: 0x00555653   "SVU" (ASCII, LE)
+0xf0008688: 0x00001404
+0xf000868c: 0xE11D07D8
+0xf00086b0: 0x00000002
+0xf00086b4: 0x80CD9000
+```
+
+- **Firm result: the permanent full-verify latch is NOT set.** `0xf0008664` = `0x70180004`, bit0 = 0. This TV has
+  not been tripped into the always-RSA-verify / brick state, which is consistent with it booting normally and with
+  `verify=n` in the U-Boot env. So the *catastrophic* OTP outcome from a failed image check has not happened here.
+- **The SBC (secure-boot enable) question is still open, but the data leans "enforced."** The bank is overwhelmingly
+  zero; `0xf0008670` = `0x6FFE01F7` is the one word Lmain reads ~29× in its `secure boot ok/fail` path, and it has
+  many bits set. We have not proven which bit is the MediaTek SBC fuse (that still needs the Lmain switch traced,
+  per above), so this is **not** a green light — a set, heavily-referenced control word in the verify path is at
+  least as consistent with secure boot being *on* as off. Do not read "full-verify latch clear" as "SBC unblown";
+  they are different fuses.
+- This is the live MMIO read-back of the OTP — the same source Lmain/U-Boot read — not the bootloader *image*
+  (that is p1 in `tv_dump`, never to be rewritten per [[flash-secureboot]]/[[tv-no-flash-writes]]).
+
 ### Image signatures
 
 Each image is the payload (4 KB-padded) plus a 0x1500-byte trailer of 21 RSA-2048 signatures. Signature k
