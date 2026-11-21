@@ -46,10 +46,12 @@ ncconf_init() {
 # SAVER_MIN = screen saver after N minutes without input (0 = off)
 # NOSLEEP   = 1: keep the TV on (LG's Auto Off / No-signal / No-operation timers off until power off)
 # LITE      = 1: stop optional LG services (browsers, voice, Skype, ...) for more free RAM
+# NETKEEP   = 1: Wi-Fi keep-alive (the TV can't hear ARP broadcasts; without it the router loses
+#             the TV for ~5 min every ~20 min)
 # The Settings app updates this section.
 EOF
     S=$(_ncconf_old "$N/home/settings.conf")
-    if [ -n "$S" ]; then echo "$S"; else printf 'SAVER_MIN=20\nNOSLEEP=1\nLITE=0\n'; fi
+    if [ -n "$S" ]; then echo "$S"; else printf 'SAVER_MIN=20\nNOSLEEP=1\nLITE=0\nNETKEEP=1\n'; fi
 
     cat <<'EOF'
 

@@ -5,6 +5,8 @@
  *   wlq [-i wlan0] set <iovar> <int>    integer iovar via WLC_SET_VAR (runtime only, nothing is saved)
  *   wlq [-i wlan0] setioc <cmd> <int>   raw WLC_SET ioctl with one int (e.g. 86 = WLC_SET_PM)
  *   wlq [-i wlan0] getkey <index>       WLC_GET_KEY: wl_wsec_key_t (index, len, algo, flags, rx IV)
+ *   wlq [-i wlan0] bss                  the AP's RSN/WPA IE: group and pairwise ciphers, AKM, DTIM
+ *   wlq [-i wlan0] cdiff [s]            which `counters` words changed over s (10) seconds
  *   wlq [-i wlan0] dump                 the values relevant to the Wi-Fi drop investigation */
 #include <net/if.h>
 #include <stdint.h>
@@ -112,6 +114,53 @@ int main(int argc, char **argv) {
         memcpy(b, &idx, 4);
         if (wl(44, b, 164, 0) < 0) { perror("getkey"); return 1; }
         hex(b, 164);
+        return 0;
+    }
+    if (!strcmp(op, "bss")) {   /* WLC_GET_BSS_INFO (136): the associated AP's beacon IEs */
+        static uint8_t b[2048];
+        memset(b, 0, sizeof b);
+        *(uint32_t *)b = sizeof b;
+        if (wl(136, b, sizeof b, 0) < 0) { perror("bss_info"); return 1; }
+        uint8_t *bi = b + 4;
+        uint32_t ver, len, ielen; uint16_t ieoff;
+        memcpy(&ver, bi, 4); memcpy(&len, bi + 4, 4); memcpy(&ieoff, bi + 116, 2); memcpy(&ielen, bi + 120, 4);
+        printf("bss_info ver=%u len=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x ssid=%.*s dtim=%u ie_off=%u ie_len=%u\n",
+               ver, len, bi[8], bi[9], bi[10], bi[11], bi[12], bi[13], bi[18] > 32 ? 32 : bi[18], bi + 19, bi[76],
+               ieoff, ielen);
+        if (ieoff < 100 || ieoff + ielen > sizeof b - 4) { hex(bi, 160); return 1; }
+        static const char *cn[] = {"none", "WEP40", "TKIP", "rsvd", "CCMP", "WEP104", "BIP"};
+        for (uint8_t *p = bi + ieoff, *e = p + ielen; p + 2 <= e && p + 2 + p[1] <= e; p += 2 + p[1]) {
+            uint8_t *q = p + 2, *qe = q + p[1];
+            int rsn = p[0] == 48, wpa = p[0] == 221 && p[1] >= 6 && !memcmp(q, "\x00\x50\xf2\x01", 4);
+            if (!rsn && !wpa) continue;
+            q += rsn ? 2 : 6;   /* RSN: version; WPA: OUI+type+version */
+            printf("%s group=%s", rsn ? "RSN" : "WPA", q + 4 <= qe ? cn[q[3] < 7 ? q[3] : 3] : "?");
+            q += 4;
+            if (q + 2 <= qe) {
+                unsigned n = q[0] | q[1] << 8; q += 2;
+                printf(" pairwise=");
+                for (unsigned i = 0; i < n && q + 4 <= qe; i++, q += 4) printf("%s%s", i ? "+" : "", cn[q[3] < 7 ? q[3] : 3]);
+            }
+            if (q + 2 <= qe) {
+                unsigned n = q[0] | q[1] << 8; q += 2;
+                printf(" akm=");
+                for (unsigned i = 0; i < n && q + 4 <= qe; i++, q += 4) printf("%s%u", i ? "+" : "", q[3]);
+            }
+            if (rsn && q + 2 <= qe) printf(" caps=0x%04x", q[0] | q[1] << 8);
+            printf("\n");
+        }
+        return 0;
+    }
+    if (!strcmp(op, "cdiff")) {   /* `counters` iovar twice, N s apart: which 32-bit words moved */
+        int s = a + 1 < argc ? atoi(argv[a + 1]) : 10;
+        static uint32_t c0[200], c1[200];
+        if (getvar("counters", c0, sizeof c0) < 0) { perror("counters"); return 1; }
+        sleep((unsigned)s);
+        if (getvar("counters", c1, sizeof c1) < 0) { perror("counters"); return 1; }
+        printf("counters ver=%u len=%u, words (index after the 4-byte header) that changed in %d s:\n",
+               c1[0] & 0xffff, c1[0] >> 16, s);
+        for (int i = 1; i < 200; i++)
+            if (c1[i] != c0[i]) printf("  [%3d] %u -> %u (+%u)\n", i - 1, c0[i], c1[i], c1[i] - c0[i]);
         return 0;
     }
     if (!strcmp(op, "dump")) {

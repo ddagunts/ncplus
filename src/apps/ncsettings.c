@@ -8,6 +8,7 @@
  *   SAVER_MIN=20   screen saver minutes (0 = off)
  *   NOSLEEP=1      switch LG's Auto Off / No-signal / No-operation timers off (RAM only)
  *   LITE=0         stop optional LG services (browsers, voice, Skype, ...)
+ *   NETKEEP=1      Wi-Fi keep-alive (tools/ncnetkeep): ARP the gateway so the router doesn't lose the TV
  */
 #include "lvgl.h"
 #include <SDL.h>
@@ -21,10 +22,10 @@
 #include <strings.h>
 
 static char base[512], tools[512], conf[512];
-static int saver_min = 20, nosleep = 1, lite = 0;
+static int saver_min = 20, nosleep = 1, lite = 0, netkeep = 1;
 static const int saver_opts[] = {0, 5, 10, 20, 30, 60};
 static lv_group_t *grp;
-static lv_obj_t *status_lbl, *info_lbl, *dd_saver, *sw_nosleep, *sw_lite;
+static lv_obj_t *status_lbl, *info_lbl, *dd_saver, *sw_nosleep, *sw_lite, *sw_netkeep;
 
 /* conf is netcast.conf (NETCAST_CONF, from run-app.sh): our keys live in its [settings] section.
  * Without NETCAST_CONF it is the old standalone $HOME/settings.conf (no sections). */
@@ -44,7 +45,8 @@ static int is_settings(const char *l) {
 }
 static int our_key(const char *l) {
     while (*l == ' ' || *l == '\t') l++;
-    return !strncmp(l, "SAVER_MIN", 9) || !strncmp(l, "NOSLEEP", 7) || !strncmp(l, "LITE", 4);
+    return !strncmp(l, "SAVER_MIN", 9) || !strncmp(l, "NOSLEEP", 7) || !strncmp(l, "LITE", 4) ||
+           !strncmp(l, "NETKEEP", 7);
 }
 
 static void load_conf(void) {
@@ -60,6 +62,7 @@ static void load_conf(void) {
         sscanf(l, "SAVER_MIN = %d", &saver_min);
         sscanf(l, "NOSLEEP = %d", &nosleep);
         sscanf(l, "LITE = %d", &lite);
+        sscanf(l, "NETKEEP = %d", &netkeep);
     }
     if (f) fclose(f);
 }
@@ -68,7 +71,7 @@ static void save_conf(void) {
     if (!sectioned) {
         FILE *f = fopen(conf, "w");
         if (!f) return;
-        fprintf(f, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n", saver_min, nosleep, lite);
+        fprintf(f, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\nNETKEEP=%d\n", saver_min, nosleep, lite, netkeep);
         fclose(f);
         return;
     }
@@ -81,14 +84,14 @@ static void save_conf(void) {
     while (in && fgets(line, sizeof line, in)) {
         const char *n; int len;
         if (is_header(line, &n, &len)) {
-            if (on && !done) { fprintf(out, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n\n", saver_min, nosleep, lite); done = 1; }
+            if (on && !done) { fprintf(out, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\nNETKEEP=%d\n\n", saver_min, nosleep, lite, netkeep); done = 1; }
             on = is_settings(line);
         } else if (on && our_key(line)) continue;
         fputs(line, out);
     }
     if (!done) {
         if (!on) fputs("\n[settings]\n", out);
-        fprintf(out, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\n", saver_min, nosleep, lite);
+        fprintf(out, "SAVER_MIN=%d\nNOSLEEP=%d\nLITE=%d\nNETKEEP=%d\n", saver_min, nosleep, lite, netkeep);
     }
     if (in) fclose(in);
     if (fclose(out) == 0) rename(tmp, conf); else remove(tmp);
@@ -142,6 +145,18 @@ static void on_lite(lv_event_t *e) {
     set_status(lite ? "Stopping optional LG services..." : "Restarting LG services...");
 }
 
+static void on_netkeep(lv_event_t *e) {
+    netkeep = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    save_conf();
+    char cmd[700];
+    run("killall ncnetkeep 2>/dev/null");
+    if (netkeep) {
+        snprintf(cmd, sizeof cmd, "nohup %s/ncnetkeep > /tmp/ncnetkeep.log 2>&1 &", tools);
+        run(cmd);
+    }
+    set_status(netkeep ? "Wi-Fi keep-alive on" : "Wi-Fi keep-alive off: the router may lose the TV every ~20 min");
+}
+
 static void on_screen_off(lv_event_t *e) {
     (void)e;
     char cmd[700];
@@ -192,7 +207,7 @@ static lv_obj_t *row(lv_obj_t *parent, const char *title, const char *hint) {
     lv_obj_set_flex_align(r, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_color(r, lv_color_hex(0x1c2238), 0);
     lv_obj_set_style_border_width(r, 0, 0);
-    lv_obj_set_style_pad_all(r, 16, 0);
+    lv_obj_set_style_pad_all(r, 13, 0);
     lv_obj_t *col = lv_obj_create(r);
     lv_obj_remove_style_all(col);
     lv_obj_set_size(col, LV_PCT(70), LV_SIZE_CONTENT);
@@ -209,6 +224,7 @@ static lv_obj_t *row(lv_obj_t *parent, const char *title, const char *hint) {
 
 static void focusable(lv_obj_t *o) {
     lv_group_add_obj(grp, o);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);   /* the list may be taller than the screen */
     lv_obj_add_event_cb(o, on_key, (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
     lv_obj_set_style_outline_width(o, 4, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_outline_color(o, lv_color_hex(0xffffff), LV_STATE_FOCUS_KEY);
@@ -253,7 +269,7 @@ int main(int argc, char **argv) {
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
-    lv_obj_set_style_pad_row(list, 14, 0);
+    lv_obj_set_style_pad_row(list, 10, 0);
 
     lv_obj_t *r = row(list, "Screen saver", "Backlight off after this long without input");
     dd_saver = lv_dropdown_create(r);
@@ -275,6 +291,12 @@ int main(int argc, char **argv) {
     if (lite) lv_obj_add_state(sw_lite, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw_lite, on_lite, LV_EVENT_VALUE_CHANGED, NULL);
     focusable(sw_lite);
+
+    r = row(list, "Wi-Fi keep-alive", "Stops the TV dropping off the network every ~20 min");
+    sw_netkeep = lv_switch_create(r);
+    if (netkeep) lv_obj_add_state(sw_netkeep, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw_netkeep, on_netkeep, LV_EVENT_VALUE_CHANGED, NULL);
+    focusable(sw_netkeep);
 
     r = row(list, "Screen off now", "Backlight off; any key turns it back on");
     lv_obj_t *b = lv_button_create(r);

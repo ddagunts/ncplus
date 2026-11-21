@@ -31,7 +31,7 @@ rm -rf "$DIST" && mkdir -p "$P/system" "$P/apps" "$P/LICENSES" "$P/tools"
 
 cp "$OUT/launcher" "$P/system/launcher"
 mkdir -p "$P/tools"
-cp "$OUT/ncscreen" "$OUT/ncnosleep" "$OUT/nclite" "$P/tools/"
+cp "$OUT/ncscreen" "$OUT/ncnosleep" "$OUT/nclite" "$OUT/ncnetkeep" "$P/tools/"
 cp "$OUT/run-app.sh" "$P/apps/run-app.sh"
 cp "$TOP/src/apps/ncconf.sh" "$P/system/ncconf.sh"   # <stick>/netcast.conf: the one settings file
 
@@ -332,11 +332,19 @@ fi
 # Created on first start from the old per-app files (home/settings.conf, apps/*/…conf) if present.
 . "$N/system/ncconf.sh"
 ncconf_init
-# [settings] (the Settings app updates it): SAVER_MIN, NOSLEEP, LITE
+# [settings] (the Settings app updates it): SAVER_MIN, NOSLEEP, LITE, NETKEEP
 SAVER_MIN=$(ncconf_get settings SAVER_MIN); NOSLEEP=$(ncconf_get settings NOSLEEP); LITE=$(ncconf_get settings LITE)
+NETKEEP=$(ncconf_get settings NETKEEP)
 case "$SAVER_MIN" in ''|*[!0-9]*) SAVER_MIN=20;; esac
 case "$NOSLEEP" in 0|1) ;; *) NOSLEEP=1;; esac
 case "$LITE" in 0|1) ;; *) LITE=0;; esac
+case "$NETKEEP" in 0|1) ;; *) NETKEEP=1;; esac
+# Wi-Fi keep-alive: the TV's Wi-Fi never receives broadcasts (so no ARP requests), and the router
+# forgets it every ~20 min. ncnetkeep ARPs the gateway and LAN peers every 30 s. Keeps running after
+# NetCast+ exits; RAM only.
+if [ "$NETKEEP" = 1 ] && ! pidof ncnetkeep >/dev/null 2>&1; then
+  nohup "$N/tools/ncnetkeep" > /tmp/ncnetkeep.log 2>&1 &
+fi
 # Keep the TV on (RAM-only: LG's Auto Off / No-signal / No-operation timers off until power cycle)
 [ "$NOSLEEP" = 1 ] && "$N/tools/ncnosleep" off
 # Our own screen saver: backlight off after N min without any input, any key brings it back
@@ -418,6 +426,8 @@ Tools (in tools/, started automatically by start.sh where noted)
   ncscreen on|off         backlight via LG's MICOM; "off --wake" until a key is pressed
   ncscreen saver [min]    screen saver daemon (start.sh: 20 min, set NETCAST_SAVER_MIN)
   nclite stop|start|list  stop/restart optional LG services (browsers, voice, Skype...) for RAM
+  ncnetkeep [-t s] [-v]   Wi-Fi keep-alive (start.sh, NETKEEP=1): the TV's Wi-Fi never receives
+                          broadcasts, so routers lose it every ~20 min; this ARPs the gateway every 30 s
   webtest.sh start|stop   local test web server (BusyBox httpd, 127.0.0.1:8090) for netcast/test/;
                           Player, Photos and the Web Browser start it when netcast.conf points at it
 
@@ -440,6 +450,11 @@ Safety
   Nothing is written to the TV's internal flash: HOME, configs and saves live in
   this folder, GStreamer's registry is redirected to RAM. Power-cycle the TV to
   return to stock.
+
+  NO WARRANTY. The authors take no responsibility for bricked or damaged TVs, and
+  these TVs are easy to brick (secure boot burns an eFuse on a signature failure).
+  Never boot a different kernel unless the TV's debug level is DEBUG
+  (tools/ncdebug status). Use at your own risk.
 EOF
 
 # --- strip debug info from our ARM binaries (keeps the stick small) ---

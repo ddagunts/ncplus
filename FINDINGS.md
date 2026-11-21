@@ -15,7 +15,8 @@ Last updated: 2026-11-20. `telnet <TV IP>` gives a root BusyBox shell (no login)
   - LG crash framework dumps (`/mnt/lg/cmn_data/*_pid*.txt`, `exc_log_*`)
   - app store installs (`/mnt/appstore`)
   - `/etc/checker.sh` (an MTK firmware installer; don't trigger it)
-- The TV sometimes drops off the network briefly (Wi-Fi). Check `uptime` before assuming a reboot.
+- Without `ncnetkeep` (start.sh runs it) the TV drops off the network for ~5 min every ~20 min (see "Wi-Fi drops").
+  Check `uptime` before assuming a reboot.
 
 ## Hardware and OS
 
@@ -418,6 +419,13 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
 
 ### Warm boot of an unsigned kernel from RAM: `nckexec.ko` (working, 2026-11-20)
 
+> **Never boot a different (non-stock) kernel unless the TV's debug level is DEBUG** (`ncdebug status`; see
+> "Debug level"). In RELEASE, a kernel that misbehaves (a flash write, or hardware left in a state the next
+> signed boot trips over) ends in U-Boot's signature-failure path: a hang plus an eFuse burn, and no UART
+> break-in to recover. That TV is bricked for good. DEBUG skips the eFuse burn and allows UART break-in.
+> `nckexec-fire.sh` refuses unless `ncdebug` reports DEBUG. The stock-kernel round trip below was done in
+> RELEASE; do not repeat that with anything else.
+
 U-Boot only RSA-checks a kernel it loads from flash. `src/kmod/nckexec.c` hands the running kernel over to
 another kernel in RAM, so the next kernel is never checked, and no flash write is involved.
 **Tested on this TV:** booting the stock kernel through it gives a fully working system. It was back on telnet
@@ -525,6 +533,31 @@ Proof that it came from our handoff and not a reset through U-Boot: `/proc/cmdli
   (IR_KEY_VOL_UP -> 115, IR_KEY_CH_UP -> 402, IR_KEY_EXIT -> 174): the IR-to-evdev conversion for "LGE RCU".
 - `HOA_PROC_UnregisterKeysFromAppKeyTable(const uint32_t *keys, uint32_t n)` exists (it would hand keys back
   to LG). The key code space it uses is unknown, so it isn't used.
+
+## Wi-Fi drops: no broadcast RX, router ARP ageing (fixed with `ncnetkeep`, 2026-11-21)
+
+- **Symptom:** unreachable for ~5 min after every ~20 min up (logs/tv-reachability.log: up 20:00-20:09, down
+  4:57-5:00, around the clock), while the AP still lists the TV as associated.
+- **Cause, TV side:** the Broadcom fullmac firmware (`wl0` 6.30.100.15) drops every group-addressed frame. The
+  radio receives them, but none reach Linux. Counters (`wlq cdiff`, `counters` v8):
+  `rxdfrmmcast` (index 82) = 8164 after 28 min, while `rxmulti` (115) = 0, wlan0 `multicast` = 0, and pktlog
+  shows bc=0 mc=0. Every software drop/decrypt counter is 0. AP: RSN group=CCMP pairwise=CCMP AKM PSK
+  (`wlq bss`), so it isn't a TKIP group-cipher mismatch; `sup_auth_status` = 6 (keyed); `allmulti` 1 has no
+  effect. Unicast both ways and broadcast *transmit* work. Root cause inside the firmware: not found.
+- **Cause, network side:** the TV can't hear ARP requests. The gateway 192.168.6.16 (clients like 192.168.9.3
+  are routed) re-checks its entry with a broadcast, gets no answer and drops it after 20 min (FreeBSD/pfSense
+  `max_age` = 1200 s fits). Linux on the TV never ARPs the gateway while TCP keeps confirming it, so nothing
+  recreates the entry until the next DHCP renew (lease 600 s, renew every 300 s) sends a unicast ARP probe.
+  That is why the outage is always just under 5 min.
+- **Fix:** `src/tools/ncnetkeep.c` (static, tools/ in every build) sends, every 30 s: a gratuitous ARP, an ARP
+  request for the default gateway (broadcast) and a unicast ARP request to each complete peer in
+  /proc/net/arp. A host that gets an ARP request for its own address (re)creates its entry for the sender.
+  start.sh starts it when `[settings] NETKEEP=1` (default); Settings has a "Wi-Fi keep-alive" switch. Verified
+  2026-11-21: started at 10:40, no drop at the predicted 10:55 expiry or after (gateway replies to each round).
+- Router-side alternative: a static ARP entry for the TV on the gateway (pfSense: DHCP static mapping with
+  "ARP Table Static Entry").
+- Tools: `wlq bss` (AP RSN/WPA IE), `wlq cdiff [s]` (counters that moved), `pktlog`, `package/tools/netmon.sh`,
+  host `tools/netwatch.sh`.
 
 ## Flash, boot chain and secure boot (2026-11-20)
 
@@ -722,8 +755,10 @@ MICOM power-cycles a hung SoC.
 - Kernel modules: tun, cifs (check `input_dev`-style struct offsets against LG's code first, as for xpadone).
 - Mute while the screen saver is dark (no extra procmgr registrations: those can't be unregistered).
 - Investigate the intermittent audio-init segfault; Wi-Fi stalls after large uploads (try Ethernet).
+- Wi-Fi: soak-test `ncnetkeep` over hours; find why the firmware drops group-addressed frames (true root cause).
 - Magic Remote pointer; ScummVM; a file browser.
-- Newer kernel: research only (no kexec; LG's display/GPU/Wi-Fi drivers are binary modules for 3.0.13).
+- Newer kernel: research only (LG's display/GPU/Wi-Fi drivers are binary modules for 3.0.13). `nckexec.ko`
+  warm-boots from RAM, but only ever try a non-stock kernel on a TV set to DEBUG.
 
 ## Project layout
 
