@@ -2,6 +2,8 @@
 
 Mainline Linux 6.12 and Debian 13 on LG NetCast smart TVs from 2013-2014 (MediaTek MT5398).
 
+![Debian 13 with the Xfce desktop on an LG NetCast TV](docs/media/debian-on-lg-netcast.jpg)
+
 The TVs have a dual Cortex-A9, a PowerVR SGX544 and 726 MB of RAM. LG shipped them with Linux 3.0.13
 and glibc 2.12. This project runs a stock Debian armhf on them, with Xfce, Firefox and apt on the TV
 panel. Its own drivers cover the display, USB host, sound, interrupt controller, second CPU and

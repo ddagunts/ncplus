@@ -18,7 +18,7 @@ flashdump/
 
 # --- Personal recordings -------------------------------------------------------
 # The user's own camera captures. Edited project demo clips under docs/media/
-# (doom-on-lg-netcast.{mp4,gif,jpg}) are intentionally kept.
+# (doom-on-lg-netcast.{mp4,gif,jpg}, debian-on-lg-netcast.jpg) are intentionally kept.
 /TRIM_*.mp4
 *-original.mp4
 /VID_*.mp4
