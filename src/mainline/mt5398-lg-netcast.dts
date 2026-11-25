@@ -1,0 +1,350 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * LG NetCast 4.x TV, MediaTek MT5398 (2x Cortex-A9 r3p0, PL310 r3p2, PowerVR SGX 544).
+ * Minimal tree for a mainline kernel warm-booted from the stock one by src/kmod/nckexec.
+ *
+ * Addresses come from the running stock kernel (2026-11-23) and Vizio's GPL MT53xx BSP
+ * (arch/arm/mach-mt53xx). Nothing here drives clocks, regulators, pinmux or panel timing:
+ * the kernel touches the A9 private peripherals, OSD plane 3 (simplefb, then the mt5398_osd
+ * KMS driver), the BIM interrupt gate, the four MUSB USB host ports (clocks and VBUS as the
+ * stock kernel left them), one SIF I2C master for the MICOM's backlight command and, only on
+ * request, the SGX544's ID and reset registers.
+ *
+ * The panel is 1920x1080; stock shows OSD plane 3 as a 1280x720 bitmap upscaled 1.5x by the
+ * OSD scaler. "nckexec,osd-1080" below makes nckexec switch plane 3 to a native 1920x1080
+ * bitmap at a fixed address after the stock kernel has shut down (scaler bypassed, region
+ * header rewritten, buffer filled with opaque black). That buffer is near the top of bank 0,
+ * reserved no-map here (stock highmem, so no nckexec staging page can be in it). If LG shows
+ * no UI (plane 3 off), nckexec writes its own region header in the page right after the
+ * buffer (0x25fe9000) and enables the plane, so no LG menu needs to be on screen.
+ *
+ * One value is only known at fire time; nckexec replaces this cookie in the DTB:
+ *   0x0ead0c0d  page holding plane 3's region header (System RAM; the OSD keeps fetching it):
+ *               LG's header page, or 0x25fe9000 when nckexec writes its own
+ * (A 720p tree would instead give the framebuffer reg as cookie 0x0fb0c0de = the stock
+ * 1280x720 bitmap in the RAM hole, with width 1280, height 720, stride 5120.)
+ * "nckexec,cpu1-hold" (cpu-hold@3e100000) asks nckexec to park CPU1 in that page instead of
+ * leaving it in the stock kernel; without it nckexec wants CPU1 offline and only CPU0 runs.
+ * After the switch nckexec patches cookies 0x05d0c0a0..3 in nckexec,osd-readback with what
+ * the OSD latched: fetched region word 4 (expect 0xf0438780) and word 1, SC3 src size
+ * (0x07800438), SC3 control (bits 2-5 clear).
+ *
+ * Restart = the MT53xx PDWNC watchdog, exactly as Vizio's arch_reset(): counter (+0x104) to
+ * 0xff000000, then enable (+0x100) = 1; it overflows in well under a second and resets the
+ * SoC into U-Boot -> stock (tested from stock 2026-11-23: back on telnet ~45 s later).
+ * DRAM keeps its contents across that reset, so ramoops in the hole is the debug log
+ * (no UART): read it back from stock with tools/ramlog.py.
+ */
+/dts-v1/;
+
+/ {
+	model = "LG NetCast TV (MediaTek MT5398)";
+	compatible = "lg,netcast-mt5398", "mediatek,mt5398";
+	#address-cells = <1>;
+	#size-cells = <1>;
+	interrupt-parent = <&gic>;
+
+	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+		/*
+		 * systemd-pstore would archive the previous ramoops record and erase it, and
+		 * ramoops then zaps the live console zone too: the current boot's log is lost.
+		 */
+		bootargs = "console=tty0 ignore_loglevel panic=10 rdinit=/init fbcon=nodefer printk.devkmsg=on systemd.mask=systemd-pstore.service";
+
+		framebuffer@25800000 {
+			compatible = "simple-framebuffer";
+			reg = <0x25800000 0x007e9000>;	/* 1920 x 1080 x 4 */
+			width = <1920>;
+			height = <1080>;
+			stride = <7680>;
+			format = "a8r8g8b8";
+			nckexec,osd-1080 = <0x0fb1080f 0x25800000>;
+			nckexec,osd-readback = <0x05d0c0a0 0x05d0c0a1 0x05d0c0a2 0x05d0c0a3>;
+		};
+	};
+
+	/*
+	 * Two banks; 0x26000000-0x3fffffff is MediaTek's reserved hole (FBM, OSD
+	 * and video buffers, still DMA targets after the hand-off) and stays out.
+	 */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x26000000>,
+		      <0x40000000 0x08800000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		framebuffer@25800000 {
+			reg = <0x25800000 0x007e9000>;	/* OSD plane 3 1080p bitmap (header page after it: osd_hdr) */
+			no-map;
+		};
+
+		osd_hdr: osd-header@ead0c0d {
+			reg = <0x0ead0c0d 0x1000>;	/* cookie: OSD region header page */
+			no-map;
+		};
+
+		/*
+		 * Scanout buffers for the OSD KMS driver (CMA, reusable). Bank 0 is known to be
+		 * reachable by the OSD; keeping the pool inside one 256 MB window means address
+		 * bits 31:28 never change, so a flip is a single write to header word 1.
+		 */
+		osd_pool: osd-pool {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x04000000>;			/* 64 MB: 7 x 1080p ARGB */
+			alloc-ranges = <0x10000000 0x10000000>;
+			alignment = <0x00100000>;
+		};
+
+		/*
+		 * pstore/ramoops in the hole: 1 MB whose hash was unchanged across a watchdog
+		 * reset + stock boot (tools: memscan). 11 x 64K oops records, then 256K console,
+		 * then 64K pmsg; tools/ramlog.py assumes this layout.
+		 */
+		ramoops@3e000000 {
+			compatible = "ramoops";
+			reg = <0x3e000000 0x100000>;
+			record-size = <0x10000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x10000>;
+			mem-type = <1>;		/* uncached ioremap: lines are in DRAM before the reset */
+		};
+
+		/*
+		 * CPU1 hold page (RAM hole, same untouched 8 MB as ramoops): nckexec parks CPU1
+		 * here, MMU off, in a WFE loop; arch/arm/mach-mt5398/platsmp.c releases it.
+		 */
+		cpu-hold@3e100000 {
+			compatible = "netcast,mt5398-cpu-hold";
+			reg = <0x3e100000 0x1000>;
+			no-map;
+			nckexec,cpu1-hold = <0x0cc1b007 0x3e100000>;
+		};
+	};
+
+	/*
+	 * TV speakers: mixer channel 2 of the audio DSP that stock leaves running (found
+	 * 2026-11-24 with mtkaudiosink on stock: it is the channel LG's PlayPCM path feeds).
+	 * Control blocks of all 9 channels in DSP shared memory, then channel 2's 8 KB ring
+	 * (48 kHz stereo S16). Both are in the RAM hole, in the DSP's window at 0x3e000000;
+	 * the driver only checks them and refuses if the DSP isn't in the stock state.
+	 */
+	sound {
+		compatible = "netcast,mt5398-mixsnd";
+		reg = <0x3ec0fa00 0x240>, <0x3ef6ff00 0x2000>;
+		reg-names = "ctrl", "ring";
+		netcast,channel = <2>;
+		netcast,dsp-window = <0x3e000000>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		enable-method = "netcast,mt5398-smp";	/* released from cpu-hold@3e100000 */
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a9";
+			reg = <0>;
+			next-level-cache = <&l2>;
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a9";
+			reg = <1>;
+			next-level-cache = <&l2>;
+		};
+	};
+
+	/* A9 PERIPHCLK: TWD rate on the stock kernel = 478.8 MHz (mult 502048, shift 20). */
+	periphclk: clock-periph {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <478000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		l2: cache-controller@f2000000 {
+			compatible = "arm,pl310-cache";	/* left enabled by the stock kernel */
+			reg = <0xf2000000 0x1000>;
+			cache-unified;
+			cache-level = <2>;
+		};
+
+		scu@f2002000 {
+			compatible = "arm,cortex-a9-scu";
+			reg = <0xf2002000 0x100>;
+		};
+
+		global-timer@f2002200 {
+			compatible = "arm,cortex-a9-global-timer";
+			reg = <0xf2002200 0x20>;
+			interrupts = <1 11 0x301>;	/* PPI 11, edge rising, CPU0+1 */
+			clocks = <&periphclk>;
+		};
+
+		/*
+		 * PDWNC watchdog: +0 enable (bit 0; bit 24 reads 1 after a watchdog reset),
+		 * +4 counter: counts up at 27 MHz (measured, boot 4), freezes while disabled,
+		 * resets the SoC on overflow. 0xff000000 -> ~0.6 s; full range ~159 s.
+		 */
+		pdwnc_wdt: syscon@f0028100 {
+			compatible = "syscon";
+			reg = <0xf0028100 0x8>;
+		};
+
+		/* Restart handlers run highest priority first: load the counter, then enable. */
+		reboot-wdt-count {
+			compatible = "syscon-reboot";
+			regmap = <&pdwnc_wdt>;
+			offset = <0x4>;
+			value = <0xff000000>;
+			priority = <200>;
+		};
+
+		reboot-wdt-enable {
+			compatible = "syscon-reboot";
+			regmap = <&pdwnc_wdt>;
+			offset = <0x0>;
+			value = <0x1>;
+			priority = <199>;
+		};
+
+		/*
+		 * The same timer as /dev/watchdog (mt5398_wdt): the initramfs arms it before
+		 * switch_root, systemd feeds it (RuntimeWatchdogSec), a hung boot resets to stock.
+		 */
+		watchdog {
+			compatible = "mediatek,mt5398-wdt";
+			regmap = <&pdwnc_wdt>;
+			offset = <0x0>;
+			timeout-sec = <150>;
+		};
+
+		/*
+		 * BIM: MediaTek's per-line enable + latch in front of the GIC (bank n line b =
+		 * SPI 32n + b). Peripheral interrupts use it as their parent; the A9 PPIs do not.
+		 */
+		bim: interrupt-controller@f0008000 {
+			compatible = "mediatek,mt5398-bim";
+			reg = <0xf0008000 0x100>;
+			interrupt-controller;
+			#interrupt-cells = <3>;
+			interrupt-parent = <&gic>;
+		};
+
+		/*
+		 * Four single-port MUSB host cores (stock: MtkUsbHcd.0-3 = usb1-4). Under stock
+		 * on 2026-11-23: port 0 had a USB stick, port 2 a PL2303 serial adapter, port 3
+		 * is the built-in LG Wi-Fi dongle (043e:3005, no driver here), port 1 nothing.
+		 * VBUS is left as the stock kernel set it.
+		 */
+		usb@f0050000 {
+			compatible = "mediatek,mt5398-musb";
+			reg = <0xf0050000 0x1000>, <0xf0059800 0x100>;
+			reg-names = "mc", "phy";
+			interrupt-parent = <&bim>;
+			interrupts = <0 15 4>;
+			interrupt-names = "mc";
+		};
+
+		usb@f0051000 {
+			compatible = "mediatek,mt5398-musb";
+			reg = <0xf0051000 0x1000>, <0xf0059900 0x100>;
+			reg-names = "mc", "phy";
+			interrupt-parent = <&bim>;
+			interrupts = <0 11 4>;
+			interrupt-names = "mc";
+		};
+
+		usb@f0052000 {
+			compatible = "mediatek,mt5398-musb";
+			reg = <0xf0052000 0x1000>, <0xf0059a00 0x100>;
+			reg-names = "mc", "phy";
+			interrupt-parent = <&bim>;
+			interrupts = <0 48 4>;	/* MISC bank line 16 */
+			interrupt-names = "mc";
+		};
+
+		usb@f0053000 {
+			compatible = "mediatek,mt5398-musb";
+			reg = <0xf0053000 0x1000>, <0xf0059b00 0x100>;
+			reg-names = "mc", "phy";
+			interrupt-parent = <&bim>;
+			interrupts = <0 49 4>;	/* MISC bank line 17 */
+			interrupt-names = "mc";
+		};
+
+		/*
+		 * OSD plane 3 (the panel layer) as a KMS device: mt5398_osd takes over the native
+		 * 1080p state nckexec leaves and unregisters simplefb. memory-region 0 must be the
+		 * page holding the plane's region header, 1 the scanout pool.
+		 */
+		display@f0021000 {
+			compatible = "mediatek,mt5398-osd";
+			/* raster: panel timing totals and live line counter (PSC); route: is PSC in use? */
+			reg = <0xf0021000 0x1000>, <0xf005e300 0x100>, <0xf0027804 0x4>;
+			reg-names = "osd", "raster", "route";
+			memory-region = <&osd_hdr>, <&osd_pool>;
+			memory-region-names = "header", "pool";
+			backlight = <&backlight>;	/* off while the CRTC is off (DPMS) */
+		};
+
+		/*
+		 * SIF I2C master 0 (BIM + 0x21240) on MediaTek's bus 1 = the osda2/oscl2 pads
+		 * (CKGEN +0x404 [1:0] = 1), at LG's clock divider 380 (27 MHz / 380). The pad mux
+		 * is set before every transfer: the stock kernel switches it between buses.
+		 */
+		i2c@f0029240 {
+			compatible = "mediatek,mt5398-sif";
+			reg = <0xf0029240 0x48>, <0xf000d400 0x8>;
+			reg-names = "sif", "pinmux";
+			mediatek,sif-bus = <1>;
+			clock-frequency = <71053>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* LG's MICOM (standby MCU): 8-bit address 0x52; {0x36,0,0} on, {0x37,0,0} off */
+			backlight: backlight@29 {
+				compatible = "lg,netcast-micom-backlight";
+				reg = <0x29>;
+			};
+		};
+
+		/*
+		 * PowerVR SGX544MP1 (LG pvrsrvkm: regs 0xf0040000 + 0xc000, GIC 85 = BIM MISC
+		 * line 21; bank 1 master, core 0 at +0x8000). mt5398_sgx only identifies and
+		 * resets it, on request through sysfs. The CKGEN words are LG's GPU clock setup,
+		 * read only. The interrupt is described, not requested.
+		 */
+		gpu@f0040000 {
+			compatible = "mediatek,mt5398-sgx", "img,powervr-sgx544";
+			reg = <0xf0040000 0xc000>, <0xf000d3d4 0x8>;
+			reg-names = "sgx", "ckgen";
+			interrupt-parent = <&bim>;
+			interrupts = <0 53 4>;	/* MISC bank line 21 */
+		};
+
+		gic: interrupt-controller@f2003000 {
+			compatible = "arm,cortex-a9-gic";
+			#interrupt-cells = <3>;
+			interrupt-controller;
+			reg = <0xf2003000 0x1000>,	/* distributor */
+			      <0xf2002100 0x100>;	/* CPU interface */
+		};
+	};
+};

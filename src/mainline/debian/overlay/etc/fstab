@@ -1,0 +1,2 @@
+# The root (ext4 image on the stick's FAT partition) is loop-mounted read-write by the
+# initramfs; the FAT partition itself is at /mnt/stick. Nothing else to mount.

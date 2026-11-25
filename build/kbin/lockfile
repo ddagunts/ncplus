@@ -1,0 +1,13 @@
+#!/bin/sh
+# Minimal stand-in for procmail's lockfile(1), enough for the MediaTek BSP's
+# scripts/Makefile.build (it only does: lockfile -1 -l 10 FILE.lock).
+# The last argument is the lock path. Spin-create it atomically (noclobber).
+for a in "$@"; do last=$a; done
+case $last in -*|'') exit 0;; esac
+i=0
+until ( set -C; : > "$last" ) 2>/dev/null; do
+	i=$((i + 1))
+	[ "$i" -ge 30 ] && { : > "$last" 2>/dev/null; break; }
+	sleep 1
+done
+exit 0

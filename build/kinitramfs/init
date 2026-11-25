@@ -1,0 +1,33 @@
+#!/bin/busybox sh
+# PID 1 for the self-built MT5398 kernel test boot.
+# Goal: bring up wired eth0 and expose a telnet shell so a successful boot
+# is reachable at a known address. No Wi-Fi (proprietary wl.ko won't load here).
+
+/bin/busybox --install -s /bin 2>/dev/null
+
+mount -t proc     proc /proc 2>/dev/null
+mount -t sysfs    sys  /sys  2>/dev/null
+mount -t devtmpfs dev  /dev  2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts   devpts /dev/pts 2>/dev/null
+
+# loopback + wired NIC (star_mac, built in)
+ip link set lo up 2>/dev/null || ifconfig lo 127.0.0.1 up
+ifconfig eth0 up
+
+# Predictable static address AND a DHCP attempt, so the TV is reachable
+# regardless of whether the LAN hands out a lease.
+ifconfig eth0 192.168.1.200 netmask 255.255.255.0
+route add default gw 192.168.1.1 2>/dev/null
+udhcpc -i eth0 -b -q -t 4 -n 2>/dev/null &
+
+# No login, direct root shell over telnet (port 23).
+telnetd -l /bin/sh
+
+# A marker so even a serial/console peek shows we reached userspace.
+echo "NETCAST-MT5398-INITRAMFS-UP maxcpus pid1 ready" > /dev/kmsg 2>/dev/null
+
+# Keep PID 1 alive.
+while : ; do
+	sleep 3600
+done

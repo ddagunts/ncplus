@@ -1,0 +1,115 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ncplus TV",
+        "description": "Turn on Settings > Remote API on the TV first. The screen there shows the address, port and token.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "Token"
+        },
+        "data_description": {
+          "host": "The TV's IP address or host name.",
+          "port": "The Remote API port (9080 unless [api] PORT in netcast.conf says otherwise).",
+          "token": "The token shown on the TV under ncplus Settings > Remote API (32 hex characters)."
+        }
+      },
+      "reauth_confirm": {
+        "title": "New ncplus token",
+        "description": "The TV at {host} refused the saved token (\"New token\" in Settings > Remote API replaces it). Enter the token the TV shows now.",
+        "data": {
+          "token": "Token"
+        },
+        "data_description": {
+          "token": "The token shown on the TV under ncplus Settings > Remote API (32 hex characters)."
+        }
+      },
+      "reconfigure": {
+        "title": "Change the ncplus TV's address",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "Token"
+        },
+        "data_description": {
+          "host": "The TV's IP address or host name.",
+          "port": "The Remote API port.",
+          "token": "The token shown on the TV under ncplus Settings > Remote API (32 hex characters)."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No answer from the TV. Check the address, that the TV is on, and that Settings > Remote API is on.",
+      "invalid_auth": "The TV refused this token.",
+      "invalid_token_format": "A token is 32 hex characters (0-9, a-f).",
+      "not_netcast": "Something answered, but it is not the ncplus API.",
+      "unknown": "Unexpected error, see the log."
+    },
+    "abort": {
+      "already_configured": "This TV is already set up.",
+      "reauth_successful": "Token updated.",
+      "reconfigure_successful": "Address updated.",
+      "wrong_device": "That address answers for a different TV."
+    }
+  },
+  "entity": {
+    "remote": {
+      "remote": {
+        "name": "Remote"
+      }
+    },
+    "sensor": {
+      "current_app": {
+        "name": "Current app"
+      }
+    },
+    "select": {
+      "screen_saver": {
+        "name": "Screen saver",
+        "state": {
+          "0": "Off",
+          "5": "5 minutes",
+          "10": "10 minutes",
+          "20": "20 minutes",
+          "30": "30 minutes",
+          "60": "60 minutes"
+        }
+      }
+    },
+    "switch": {
+      "keep_awake": {
+        "name": "Keep TV awake"
+      },
+      "lite_mode": {
+        "name": "Lite mode"
+      },
+      "wifi_keepalive": {
+        "name": "Wi-Fi keep-alive"
+      }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "No answer from the TV: {error}"
+    },
+    "invalid_auth": {
+      "message": "The TV refused the token. Re-enter it under the integration's Reconfigure / Re-authenticate."
+    },
+    "api_error": {
+      "message": "The TV refused the request: {error}"
+    },
+    "unknown_source": {
+      "message": "Unknown source or activity \"{source}\"."
+    },
+    "bad_repeat": {
+      "message": "num_repeats must be 1 to {max}."
+    },
+    "bad_delay": {
+      "message": "delay_secs must be 0 to 10 seconds."
+    },
+    "bad_hold": {
+      "message": "hold_secs must be 0.02 to 10 seconds (or 0 for a normal press)."
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "domain": "netcast_plus",
+  "name": "ncplus",
+  "codeowners": [
+    "@ddagunts"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/ddagunts/ncplus/blob/main/docs/home-assistant.md",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/ddagunts/ncplus/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

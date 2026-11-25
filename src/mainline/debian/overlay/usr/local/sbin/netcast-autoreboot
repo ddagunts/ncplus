@@ -1,0 +1,17 @@
+#!/bin/sh
+# See netcast-autoreboot.service. `touch /run/stay` keeps the system up; `reboot` (the
+# PDWNC watchdog restart handler) goes back to stock at any time.
+t=0
+for a in $(cat /proc/cmdline); do
+	case "$a" in netcast.reboot=*) t=${a#*=} ;; esac
+done
+[ "$t" = 0 ] && exit 0
+echo "netcast-autoreboot: back to the stock software in ${t}s unless /run/stay exists" > /dev/kmsg
+n=0
+while [ "$n" -lt "$t" ]; do
+	sleep 10
+	n=$((n + 10))
+	[ -e /run/stay ] && { echo "netcast-autoreboot: /run/stay, staying up" > /dev/kmsg; exit 0; }
+done
+echo "netcast-autoreboot: rebooting after ${t}s" > /dev/kmsg
+exec systemctl reboot

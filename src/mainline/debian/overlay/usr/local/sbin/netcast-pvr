@@ -1,0 +1,9 @@
+#!/bin/sh
+# Opt-in SGX544 test (netcast-pvr.service): runs when <stick>/netcast/mainline/pvrtest exists.
+# The test lives on the stick (src/mainline/sgx/pvrtest.sh -> <stick>/netcast/mainline/pvr/),
+# with the kernel module, so changing either needs no new debian.img.
+M=/mnt/stick/netcast/mainline
+if [ -f $M/pvr/pvrtest.sh ]; then
+	exec sh $M/pvr/pvrtest.sh
+fi
+echo "pvrtest: $M/pvrtest exists but $M/pvr/pvrtest.sh doesn't" > /dev/kmsg

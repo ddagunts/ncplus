@@ -1,0 +1,739 @@
+--- a/CMakeLists.txt	2025-09-01 17:33:27.000000000 -0400
++++ b/CMakeLists.txt	2026-11-20 00:09:37.976973855 -0500
+@@ -477,6 +477,8 @@
+ dep_option(SDL_WAYLAND_LIBDECOR_SHARED     "Dynamically load libdecor support" ON "SDL_WAYLAND_LIBDECOR;SDL_WAYLAND_SHARED" OFF)
+ dep_option(SDL_WAYLAND_QT_TOUCH    "QtWayland server support for Wayland video driver" ON "SDL_WAYLAND" OFF)
+ set_option(SDL_RPI                 "Use Raspberry Pi 0-3 video driver" ${UNIX_SYS})
++set_option(SDL_NETCAST             "Use LG NetCast (libnc) video driver" OFF)
++set(SDL_NETCAST_LIBNC_DIR "" CACHE PATH "Path to libnc sources (nc.c, nc.h, keynames.h)")
+ set_option(SDL_COCOA               "Use Cocoa video driver" ${APPLE})
+ set_option(SDL_DIRECTX             "Use DirectX for Windows audio/video" ${WINDOWS})
+ set_option(SDL_XINPUT              "Use Xinput for Windows" ${WINDOWS})
+@@ -1511,6 +1513,21 @@
+   if(SDL_VIDEO)
+     # Need to check for Raspberry PI first and add platform specific compiler flags, otherwise the test for GLES fails!
+     CheckRPI()
++    if(SDL_NETCAST AND SDL_VIDEO)
++      set(SDL_VIDEO_DRIVER_NETCAST 1)
++      file(GLOB VIDEO_NETCAST_SOURCES ${SDL2_SOURCE_DIR}/src/video/netcast/*.c)
++      list(APPEND SOURCE_FILES ${VIDEO_NETCAST_SOURCES} ${SDL_NETCAST_LIBNC_DIR}/nc.c)
++      set_source_files_properties(${SDL_NETCAST_LIBNC_DIR}/nc.c PROPERTIES COMPILE_DEFINITIONS NC_NO_EGL)
++      include_directories(${SDL_NETCAST_LIBNC_DIR})
++      set(HAVE_SDL_VIDEO TRUE)
++      set(HAVE_VIDEO_NETCAST TRUE)
++    endif()
++    if(SDL_NETCAST AND SDL_AUDIO)
++      set(SDL_AUDIO_DRIVER_NETCAST 1)
++      file(GLOB AUDIO_NETCAST_SOURCES ${SDL2_SOURCE_DIR}/src/audio/netcast/*.c)
++      list(APPEND SOURCE_FILES ${AUDIO_NETCAST_SOURCES})
++      set(HAVE_SDL_AUDIO TRUE)
++    endif()
+     CheckX11()
+     CheckDirectFB()
+     # Need to check for EGL first because KMSDRM and Wayland depends on it.
+--- a/include/SDL_config.h.cmake	2025-08-30 08:47:00.000000000 -0400
++++ b/include/SDL_config.h.cmake	2026-11-20 00:09:37.976973855 -0500
+@@ -299,6 +299,7 @@
+ #cmakedefine SDL_AUDIO_DRIVER_ARTS @SDL_AUDIO_DRIVER_ARTS@
+ #cmakedefine SDL_AUDIO_DRIVER_ARTS_DYNAMIC @SDL_AUDIO_DRIVER_ARTS_DYNAMIC@
+ #cmakedefine SDL_AUDIO_DRIVER_COREAUDIO @SDL_AUDIO_DRIVER_COREAUDIO@
++#cmakedefine SDL_AUDIO_DRIVER_NETCAST @SDL_AUDIO_DRIVER_NETCAST@
+ #cmakedefine SDL_AUDIO_DRIVER_DISK @SDL_AUDIO_DRIVER_DISK@
+ #cmakedefine SDL_AUDIO_DRIVER_DSOUND @SDL_AUDIO_DRIVER_DSOUND@
+ #cmakedefine SDL_AUDIO_DRIVER_DUMMY @SDL_AUDIO_DRIVER_DUMMY@
+@@ -416,6 +417,7 @@
+ #cmakedefine SDL_VIDEO_DRIVER_WINDOWS @SDL_VIDEO_DRIVER_WINDOWS@
+ #cmakedefine SDL_VIDEO_DRIVER_WINRT @SDL_VIDEO_DRIVER_WINRT@
+ #cmakedefine SDL_VIDEO_DRIVER_WAYLAND @SDL_VIDEO_DRIVER_WAYLAND@
++#cmakedefine SDL_VIDEO_DRIVER_NETCAST @SDL_VIDEO_DRIVER_NETCAST@
+ #cmakedefine SDL_VIDEO_DRIVER_RPI @SDL_VIDEO_DRIVER_RPI@
+ #cmakedefine SDL_VIDEO_DRIVER_VIVANTE @SDL_VIDEO_DRIVER_VIVANTE@
+ #cmakedefine SDL_VIDEO_DRIVER_VIVANTE_VDK @SDL_VIDEO_DRIVER_VIVANTE_VDK@
+--- a/src/audio/netcast/SDL_netcastaudio.c	1969-12-31 19:00:00.000000000 -0500
++++ b/src/audio/netcast/SDL_netcastaudio.c	2026-11-20 00:10:07.857090409 -0500
+@@ -0,0 +1,267 @@
++/*
++  SDL audio driver for LG NetCast 4.x TVs (MT5398).
++
++  The TV has no ALSA playback devices; PCM goes through MediaTek's GStreamer 0.10
++  element "mtkaudiosink" (render-mode=1 = real MTAL output; 0 = fake, 2 = dump).
++  Pipeline:  appsrc name=src ! mtkaudiosink render-mode=1
++  GStreamer is dlopen'ed from the TV's /usr/local/lib at runtime.
++
++  Flash safety: GStreamer writes its plugin registry to $GST_REGISTRY, which LG points
++  at /mnt/flash/data. We force it into /tmp (RAM) before gst_init().
++*/
++#include "../../SDL_internal.h"
++
++#ifdef SDL_AUDIO_DRIVER_NETCAST
++
++#include "SDL_timer.h"
++#include "SDL_audio.h"
++#include "SDL_loadso.h"
++#include "../SDL_audio_c.h"
++#include "../SDL_sysaudio.h"
++
++#define _THIS SDL_AudioDevice *_this
++
++#include <stdint.h>
++#include <string.h>
++#include <unistd.h>
++
++/* --- minimal GStreamer 0.10 / GObject ABI (32-bit ARM) --- */
++typedef struct {
++    void *g_class;          /* GTypeInstance */
++    int refcount;
++    unsigned flags;
++    void *reserved;
++    uint8_t *data;          /* GST_BUFFER_DATA */
++    unsigned size;          /* GST_BUFFER_SIZE */
++} nc_GstBuffer;
++
++#define GST_STATE_NULL 1
++#define GST_STATE_PLAYING 4
++
++static void *gst_lib, *gstapp_lib, *gobj_lib;
++static int (*p_gst_init_check)(int *, char ***, void **);
++static void *(*p_gst_parse_launch)(const char *, void **);
++static void *(*p_gst_bin_get_by_name)(void *, const char *);
++static void *(*p_gst_caps_from_string)(const char *);
++static void (*p_gst_caps_unref)(void *);
++static int (*p_gst_element_set_state)(void *, int);
++static void (*p_gst_object_unref)(void *);
++static nc_GstBuffer *(*p_gst_buffer_new_and_alloc)(unsigned);
++static int (*p_gst_app_src_push_buffer)(void *, void *);
++static int (*p_gst_app_src_end_of_stream)(void *);
++static void (*p_g_object_set)(void *, const char *, ...);
++static int gst_ready;
++
++struct SDL_PrivateAudioData {
++    void *pipeline;
++    void *appsrc;
++    Uint8 *mixbuf;
++    Uint64 start_ms;
++    Uint64 bytes_pushed;
++    int bytes_per_sec;
++};
++
++static void *load_any(const char *const *names)
++{
++    for (; *names; names++) {
++        void *h = SDL_LoadObject(*names);
++        if (h) return h;
++    }
++    return NULL;
++}
++
++static void NETCAST_UnloadGst(void)
++{
++    if (gstapp_lib) SDL_UnloadObject(gstapp_lib);
++    if (gst_lib) SDL_UnloadObject(gst_lib);
++    if (gobj_lib) SDL_UnloadObject(gobj_lib);
++    gstapp_lib = gst_lib = gobj_lib = NULL;
++    gst_ready = 0;
++}
++
++static int NETCAST_LoadGst(void)
++{
++    static const char *const gst_names[] = { "libgstreamer-0.10.so.0", "/usr/local/lib/libgstreamer-0.10.so.0", NULL };
++    static const char *const app_names[] = { "libgstapp-0.10.so.0", "/usr/local/lib/libgstapp-0.10.so.0", NULL };
++    static const char *const gob_names[] = { "libgobject-2.0.so.0", "/usr/local/lib/libgobject-2.0.so.0", NULL };
++    const char *reg;
++
++    if (gst_ready) return 0;
++
++    /* never let GStreamer rewrite LG's registry on flash */
++    reg = SDL_getenv("GST_REGISTRY");
++    if (!reg || SDL_strncmp(reg, "/tmp/", 5) != 0) {
++        SDL_setenv("GST_REGISTRY", "/tmp/ncapp-gstreg.bin", 1);
++    }
++
++    gobj_lib = load_any(gob_names);
++    gst_lib = load_any(gst_names);
++    gstapp_lib = load_any(app_names);
++    if (!gobj_lib || !gst_lib || !gstapp_lib) {
++        NETCAST_UnloadGst();
++        return SDL_SetError("netcast audio: GStreamer 0.10 libraries not found");
++    }
++#define L(lib, sym) if (!(*(void **)&p_##sym = SDL_LoadFunction(lib, #sym))) { NETCAST_UnloadGst(); return -1; }
++    L(gst_lib, gst_init_check);
++    L(gst_lib, gst_parse_launch);
++    L(gst_lib, gst_bin_get_by_name);
++    L(gst_lib, gst_caps_from_string);
++    L(gst_lib, gst_caps_unref);
++    L(gst_lib, gst_element_set_state);
++    L(gst_lib, gst_object_unref);
++    L(gst_lib, gst_buffer_new_and_alloc);
++    L(gstapp_lib, gst_app_src_push_buffer);
++    L(gstapp_lib, gst_app_src_end_of_stream);
++    L(gobj_lib, g_object_set);
++#undef L
++    if (!p_gst_init_check(NULL, NULL, NULL)) {
++        NETCAST_UnloadGst();
++        return SDL_SetError("netcast audio: gst_init failed");
++    }
++    gst_ready = 1;
++    return 0;
++}
++
++static int nearest_rate(int f)
++{
++    static const int rates[] = { 8000, 11025, 16000, 22050, 32000, 44100, 48000 };
++    int best = 48000, i;
++    for (i = 0; i < (int)SDL_arraysize(rates); i++) {
++        if (rates[i] >= f) { best = rates[i]; break; }
++    }
++    return best;
++}
++
++static int NETCAST_OpenDevice(_THIS, const char *devname)
++{
++    struct SDL_PrivateAudioData *h;
++    char capsstr[160];
++    void *caps;
++
++    if (_this->iscapture) {
++        return SDL_SetError("netcast audio: capture not supported");
++    }
++    if (NETCAST_LoadGst() < 0) {
++        return -1;
++    }
++    h = (struct SDL_PrivateAudioData *)SDL_calloc(1, sizeof(*h));
++    if (!h) {
++        return SDL_OutOfMemory();
++    }
++    _this->hidden = h;
++
++    _this->spec.format = AUDIO_S16LSB;
++    if (_this->spec.channels > 2) _this->spec.channels = 2;
++    if (_this->spec.channels < 1) _this->spec.channels = 2;
++    _this->spec.freq = nearest_rate(_this->spec.freq);
++    SDL_CalculateAudioSpec(&_this->spec);
++
++    h->mixbuf = (Uint8 *)SDL_malloc(_this->spec.size);
++    if (!h->mixbuf) {
++        return SDL_OutOfMemory();
++    }
++    SDL_memset(h->mixbuf, _this->spec.silence, _this->spec.size);
++    h->bytes_per_sec = _this->spec.freq * _this->spec.channels * 2;
++
++    h->pipeline = p_gst_parse_launch("appsrc name=src ! mtkaudiosink render-mode=1", NULL);
++    if (!h->pipeline) {
++        return SDL_SetError("netcast audio: can't build GStreamer pipeline");
++    }
++    h->appsrc = p_gst_bin_get_by_name(h->pipeline, "src");
++    if (!h->appsrc) {
++        return SDL_SetError("netcast audio: appsrc missing");
++    }
++    SDL_snprintf(capsstr, sizeof(capsstr),
++                 "audio/x-raw-int,rate=%d,channels=%d,width=16,depth=16,signed=true,endianness=1234",
++                 _this->spec.freq, _this->spec.channels);
++    caps = p_gst_caps_from_string(capsstr);
++    p_g_object_set(h->appsrc, "caps", caps, "block", 1, "max-bytes", (Uint64)(_this->spec.size * 4), NULL);
++    p_gst_caps_unref(caps);
++    p_gst_element_set_state(h->pipeline, GST_STATE_PLAYING);
++
++    SDL_Log("netcast audio: mtkaudiosink %d Hz, %d ch, %d-sample buffers",
++            _this->spec.freq, _this->spec.channels, _this->spec.samples);
++    return 0;
++}
++
++static void NETCAST_WaitDevice(_THIS)
++{
++    /* Keep at most ~100 ms queued ahead of real time; appsrc also blocks when full. */
++    struct SDL_PrivateAudioData *h = _this->hidden;
++    Uint64 now = SDL_GetTicks64();
++    Uint64 played_ms, queued_ms;
++    if (!h->start_ms) {
++        return;
++    }
++    played_ms = now - h->start_ms;
++    queued_ms = h->bytes_pushed * 1000 / (Uint64)h->bytes_per_sec;
++    if (queued_ms > played_ms + 100) {
++        SDL_Delay((Uint32)(queued_ms - played_ms - 100));
++    } else if (played_ms > queued_ms + 500) {
++        /* underrun (e.g. app stalled): restart the reference clock */
++        h->start_ms = now;
++        h->bytes_pushed = 0;
++    }
++}
++
++static void NETCAST_PlayDevice(_THIS)
++{
++    struct SDL_PrivateAudioData *h = _this->hidden;
++    nc_GstBuffer *buf = p_gst_buffer_new_and_alloc(_this->spec.size);
++    if (!buf) {
++        return;
++    }
++    SDL_memcpy(buf->data, h->mixbuf, _this->spec.size);
++    p_gst_app_src_push_buffer(h->appsrc, buf);   /* takes ownership */
++    if (!h->start_ms) {
++        h->start_ms = SDL_GetTicks64();
++    }
++    h->bytes_pushed += _this->spec.size;
++}
++
++static Uint8 *NETCAST_GetDeviceBuf(_THIS)
++{
++    return _this->hidden->mixbuf;
++}
++
++static void NETCAST_CloseDevice(_THIS)
++{
++    struct SDL_PrivateAudioData *h = _this->hidden;
++    if (!h) {
++        return;
++    }
++    if (h->pipeline) {
++        if (h->appsrc) {
++            p_gst_app_src_end_of_stream(h->appsrc);
++            p_gst_object_unref(h->appsrc);
++        }
++        p_gst_element_set_state(h->pipeline, GST_STATE_NULL);
++        p_gst_object_unref(h->pipeline);
++    }
++    SDL_free(h->mixbuf);
++    SDL_free(h);
++    _this->hidden = NULL;
++}
++
++static SDL_bool NETCAST_Init(SDL_AudioDriverImpl *impl)
++{
++    /* Only claim availability on the TV (mtkaudiosink lives in the MTK gst plugin). */
++    if (access("/usr/local/lib/gstreamer-0.10/libgstmtkelements.so", R_OK) != 0) {
++        return SDL_FALSE;
++    }
++    impl->OpenDevice = NETCAST_OpenDevice;
++    impl->WaitDevice = NETCAST_WaitDevice;
++    impl->PlayDevice = NETCAST_PlayDevice;
++    impl->GetDeviceBuf = NETCAST_GetDeviceBuf;
++    impl->CloseDevice = NETCAST_CloseDevice;
++    impl->Deinitialize = NETCAST_UnloadGst;
++    impl->OnlyHasDefaultOutputDevice = SDL_TRUE;
++    impl->SupportsNonPow2Samples = SDL_TRUE;
++    return SDL_TRUE;
++}
++
++AudioBootStrap NETCASTAUDIO_bootstrap = {
++    "netcast", "LG NetCast mtkaudiosink (GStreamer 0.10)", NETCAST_Init, SDL_FALSE
++};
++
++#endif /* SDL_AUDIO_DRIVER_NETCAST */
+--- a/src/audio/SDL_audio.c	2025-01-01 10:47:53.000000000 -0500
++++ b/src/audio/SDL_audio.c	2026-11-20 00:09:37.976973855 -0500
+@@ -42,6 +42,9 @@
+ 
+ /* Available audio drivers */
+ static const AudioBootStrap *const bootstrap[] = {
++#ifdef SDL_AUDIO_DRIVER_NETCAST
++    &NETCASTAUDIO_bootstrap,
++#endif
+ #ifdef SDL_AUDIO_DRIVER_PULSEAUDIO
+     &PULSEAUDIO_bootstrap,
+ #endif
+--- a/src/audio/SDL_sysaudio.h	2025-01-01 10:47:53.000000000 -0500
++++ b/src/audio/SDL_sysaudio.h	2026-11-20 00:09:37.972973840 -0500
+@@ -197,6 +197,7 @@
+ extern AudioBootStrap PAUDIO_bootstrap;
+ extern AudioBootStrap HAIKUAUDIO_bootstrap;
+ extern AudioBootStrap COREAUDIO_bootstrap;
++extern AudioBootStrap NETCASTAUDIO_bootstrap;
+ extern AudioBootStrap DISKAUDIO_bootstrap;
+ extern AudioBootStrap DUMMYAUDIO_bootstrap;
+ extern AudioBootStrap FUSIONSOUND_bootstrap;
+--- a/src/video/netcast/SDL_netcastvideo.c	1969-12-31 19:00:00.000000000 -0500
++++ b/src/video/netcast/SDL_netcastvideo.c	2026-11-20 08:01:40.509504311 -0500
+@@ -0,0 +1,371 @@
++/*
++  SDL video driver for LG NetCast 4.x TVs (MT5398, PowerVR SGX), built on libnc.
++
++  - One fullscreen 1280x720 window: the HOA window procmgr assigns to the process.
++  - OpenGL ES 2 via SDL's EGL helpers; the EGL native window is the HOA window ID.
++  - Input from libnc: evdev keyboards/remotes/mice (incl. hot-plugged USB devices),
++    mapped with SDL's Linux scancode table.
++
++  Launch apps through run-app.sh so the LG app environment is set up.
++*/
++#include "../../SDL_internal.h"
++
++#ifdef SDL_VIDEO_DRIVER_NETCAST
++
++#include "../SDL_sysvideo.h"
++#include "../SDL_egl_c.h"
++#include "../../events/SDL_events_c.h"
++#include "../../events/SDL_keyboard_c.h"
++#include "../../events/SDL_mouse_c.h"
++#include "../../events/SDL_scancode_tables_c.h"
++#include "SDL_hints.h"
++
++#include <linux/input.h>
++#include "nc.h"
++
++#define NETCAST_W 1280
++#define NETCAST_H 720
++
++typedef struct SDL_WindowData {
++    EGLSurface egl_surface;
++    int frames;
++} SDL_WindowData;
++
++static SDL_Window *netcast_window;
++static int shift_l, shift_r, caps;
++
++/* ------------------------------------------------------------------ GLES */
++static int NETCAST_GLES_LoadLibrary(_THIS, const char *path)
++{
++    return SDL_EGL_LoadLibrary(_this, path, EGL_DEFAULT_DISPLAY, 0);
++}
++SDL_EGL_CreateContext_impl(NETCAST)
++SDL_EGL_MakeCurrent_impl(NETCAST)
++
++/* The TV composites our plane over video / LG UI using per-pixel framebuffer alpha.
++ * Many apps write alpha=0 (e.g. Doom's palette conversion) -> invisible window.
++ * Force alpha to 1 before every swap, unless NC_ALPHA_OVERLAY=1 (see-through overlays). */
++typedef void (*pfn_colormask)(unsigned char, unsigned char, unsigned char, unsigned char);
++typedef void (*pfn_clearcolor)(float, float, float, float);
++typedef void (*pfn_clear)(unsigned);
++typedef void (*pfn_getfloatv)(unsigned, float *);
++typedef void (*pfn_getbooleanv)(unsigned, unsigned char *);
++typedef unsigned char (*pfn_isenabled)(unsigned);
++typedef void (*pfn_able)(unsigned);
++static struct {
++    int inited, overlay;
++    pfn_colormask ColorMask; pfn_clearcolor ClearColor; pfn_clear Clear;
++    pfn_getfloatv GetFloatv; pfn_getbooleanv GetBooleanv; pfn_isenabled IsEnabled; pfn_able Enable, Disable;
++} opq;
++
++static void force_opaque(void)
++{
++    float cc[4];
++    unsigned char mask[4], scissor;
++    if (!opq.inited) {
++        const char *e = SDL_getenv("NC_ALPHA_OVERLAY");
++        opq.inited = 1;
++        opq.overlay = e && *e == '1';
++        opq.ColorMask = (pfn_colormask)SDL_GL_GetProcAddress("glColorMask");
++        opq.ClearColor = (pfn_clearcolor)SDL_GL_GetProcAddress("glClearColor");
++        opq.Clear = (pfn_clear)SDL_GL_GetProcAddress("glClear");
++        opq.GetFloatv = (pfn_getfloatv)SDL_GL_GetProcAddress("glGetFloatv");
++        opq.GetBooleanv = (pfn_getbooleanv)SDL_GL_GetProcAddress("glGetBooleanv");
++        opq.IsEnabled = (pfn_isenabled)SDL_GL_GetProcAddress("glIsEnabled");
++        opq.Enable = (pfn_able)SDL_GL_GetProcAddress("glEnable");
++        opq.Disable = (pfn_able)SDL_GL_GetProcAddress("glDisable");
++    }
++    if (opq.overlay || !opq.ColorMask || !opq.Clear || !opq.GetFloatv || !opq.GetBooleanv || !opq.IsEnabled) {
++        return;
++    }
++    opq.GetFloatv(0x0C22 /* GL_COLOR_CLEAR_VALUE */, cc);
++    opq.GetBooleanv(0x0C23 /* GL_COLOR_WRITEMASK */, mask);
++    scissor = opq.IsEnabled(0x0C11 /* GL_SCISSOR_TEST */);
++    if (scissor) opq.Disable(0x0C11);
++    opq.ColorMask(0, 0, 0, 1);
++    opq.ClearColor(0.f, 0.f, 0.f, 1.f);
++    opq.Clear(0x4000 /* GL_COLOR_BUFFER_BIT */);
++    opq.ColorMask(mask[0], mask[1], mask[2], mask[3]);
++    opq.ClearColor(cc[0], cc[1], cc[2], cc[3]);
++    if (scissor) opq.Enable(0x0C11);
++}
++
++typedef void (*pfn_readpixels)(int, int, int, int, unsigned, unsigned, void *);
++static int nc_debug = -1;
++static void debug_frame(SDL_Window *window, int frame)
++{
++    static pfn_readpixels ReadPixels;
++    unsigned char px[3][4];
++    uint32_t prop[16];
++    int (*get_prop)(uint32_t, void *);
++    if (frame != 1 && frame != 60 && frame != 300) return;
++    if (!ReadPixels) ReadPixels = (pfn_readpixels)SDL_GL_GetProcAddress("glReadPixels");
++    SDL_memset(px, 0, sizeof(px));
++    if (ReadPixels) {
++        ReadPixels(640, 360, 1, 1, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, px[0]);
++        ReadPixels(10, 10, 1, 1, 0x1908, 0x1401, px[1]);
++        ReadPixels(400, 500, 1, 1, 0x1908, 0x1401, px[2]);
++    }
++    SDL_memset(prop, 0, sizeof(prop));
++    get_prop = (int (*)(uint32_t, void *))nc_hoa_sym("HOA_GX_GetWindowProperty");
++    if (get_prop) get_prop(nc_window_id(), prop);
++    nc_log("netcast dbg frame %d: rgba centre %02x%02x%02x%02x corner %02x%02x%02x%02x low %02x%02x%02x%02x | win %u visible=%u flags=%08x",
++           frame, px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
++           px[2][0], px[2][1], px[2][2], px[2][3], nc_window_id(), prop[1], window->flags);
++}
++
++static int NETCAST_GLES_SwapWindow(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++    int r;
++    force_opaque();
++    if (nc_debug < 0) { const char *e = SDL_getenv("NC_DEBUG"); nc_debug = e && *e == '1'; }
++    if (nc_debug) debug_frame(window, data->frames + 1);
++    r = SDL_EGL_SwapBuffers(_this, data->egl_surface);
++    if (data->frames++ == 0) {
++        nc_update_window();
++    }
++    return r;
++}
++
++/* ---------------------------------------------------------------- input */
++static char ascii_for(int code, int shift)
++{
++    static const char *row_lo = "1234567890-=", *row_hi = "!@#$%^&*()_+";
++    static const char *q_lo = "qwertyuiop[]", *a_lo = "asdfghjkl;'`", *z_lo = "zxcvbnm,./";
++    static const char *q_hi = "QWERTYUIOP{}", *a_hi = "ASDFGHJKL:\"~", *z_hi = "ZXCVBNM<>?";
++    if (code >= KEY_1 && code <= KEY_EQUAL) return (shift ? row_hi : row_lo)[code - KEY_1];
++    if (code >= KEY_Q && code <= KEY_RIGHTBRACE) return (shift ? q_hi : q_lo)[code - KEY_Q];
++    if (code >= KEY_A && code <= KEY_GRAVE) return (shift ? a_hi : a_lo)[code - KEY_A];
++    if (code >= KEY_Z && code <= KEY_SLASH) return (shift ? z_hi : z_lo)[code - KEY_Z];
++    if (code == KEY_BACKSLASH) return shift ? '|' : '\\';
++    if (code == KEY_SPACE) return ' ';
++    return 0;
++}
++
++static void handle_key(int code, int value)
++{
++    Uint8 state = value ? SDL_PRESSED : SDL_RELEASED;
++    if (code == BTN_LEFT || code == BTN_RIGHT || code == BTN_MIDDLE) {
++        Uint8 b = code == BTN_LEFT ? SDL_BUTTON_LEFT : code == BTN_RIGHT ? SDL_BUTTON_RIGHT : SDL_BUTTON_MIDDLE;
++        if (value != 2) SDL_SendMouseButton(netcast_window, 0, state, b);
++        return;
++    }
++    if (code == KEY_LEFTSHIFT) shift_l = value != 0;
++    if (code == KEY_RIGHTSHIFT) shift_r = value != 0;
++    if (code == KEY_CAPSLOCK && value == 1) caps = !caps;
++
++    SDL_Scancode sc = SDL_GetScancodeFromTable(SDL_SCANCODE_TABLE_LINUX, code);
++    /* LG remote keys with no SDL equivalent: map to generic keys apps can bind. */
++    switch (code) {
++    case KEY_CHANNELUP:   sc = SDL_SCANCODE_PAGEUP; break;     /* CH+ */
++    case KEY_CHANNELDOWN: sc = SDL_SCANCODE_PAGEDOWN; break;   /* CH- (Back arrives as KEY_ESC from libnc) */
++    case KEY_RED:         sc = SDL_SCANCODE_F1; break;
++    case KEY_GREEN:       sc = SDL_SCANCODE_F2; break;
++    case KEY_YELLOW:      sc = SDL_SCANCODE_F3; break;
++    case KEY_BLUE:        sc = SDL_SCANCODE_F4; break;
++    default: break;
++    }
++    if (sc == SDL_SCANCODE_UNKNOWN) {
++        /* TODO: map LG remote-specific codes (e.g. Back) here once identified */
++        static unsigned char logged[1024];
++        if (code >= 0 && code < 1024 && !logged[code]) {
++            logged[code] = 1;
++            nc_log("netcast: unmapped evdev key code %d", code);
++        }
++        return;
++    }
++    SDL_SendKeyboardKey(state, sc);   /* value 2 (autorepeat) -> another press */
++
++    if (value && SDL_EventState(SDL_TEXTINPUT, SDL_QUERY)) {
++        int shift = shift_l || shift_r;
++        char c = ascii_for(code, shift);
++        if (c >= 'a' && c <= 'z' && caps) c = (char)(c - 32);
++        else if (c >= 'A' && c <= 'Z' && caps) c = (char)(c + 32);
++        if (c) {
++            char text[2] = { c, 0 };
++            SDL_SendKeyboardText(text);
++        }
++    }
++}
++
++static void NETCAST_PumpEvents(_THIS)
++{
++    nc_event e;
++    while (nc_poll(&e, 0)) {
++        switch (e.type) {
++        case NC_EV_KEY:
++            handle_key(e.code, e.value);
++            break;
++        case NC_EV_REL:
++            if (e.code == REL_X) SDL_SendMouseMotion(netcast_window, 0, 1, e.value, 0);
++            else if (e.code == REL_Y) SDL_SendMouseMotion(netcast_window, 0, 1, 0, e.value);
++            else if (e.code == REL_WHEEL) SDL_SendMouseWheel(netcast_window, 0, 0.0f, (float)e.value, SDL_MOUSEWHEEL_NORMAL);
++            else if (e.code == REL_HWHEEL) SDL_SendMouseWheel(netcast_window, 0, (float)e.value, 0.0f, SDL_MOUSEWHEEL_NORMAL);
++            break;
++        case NC_EV_QUIT:
++            SDL_SendQuit();
++            break;
++        default:
++            break;
++        }
++    }
++}
++
++/* ---------------------------------------------------------------- video */
++/* LG's libdbgfrwk swallows stdout/stderr once loaded: send SDL_Log through libnc. */
++static void NETCAST_LogOutput(void *userdata, int category, SDL_LogPriority priority, const char *message)
++{
++    nc_log("%s", message);
++}
++
++static int NETCAST_VideoInit(_THIS)
++{
++    SDL_VideoDisplay display;
++    SDL_DisplayMode mode;
++    nc_config cfg;
++    const char *t = SDL_getenv("NC_TIMEOUT");
++
++    SDL_zero(cfg);
++    cfg.no_egl = 1;   /* SDL's EGL code creates the surface/context */
++    cfg.timeout_s = t ? SDL_atoi(t) : 0;
++    if (nc_init(&cfg) != 0) {
++        return SDL_SetError("netcast: libnc init failed (launched via run-app.sh?)");
++    }
++    SDL_LogSetOutputFunction(NETCAST_LogOutput, NULL);
++
++    SDL_zero(mode);
++    mode.format = SDL_PIXELFORMAT_ARGB8888;
++    mode.w = NETCAST_W;
++    mode.h = NETCAST_H;
++    mode.refresh_rate = 60;
++    SDL_zero(display);
++    display.desktop_mode = mode;
++    display.current_mode = mode;
++    if (SDL_AddVideoDisplay(&display, SDL_FALSE) < 0) {
++        return -1;
++    }
++    return 0;
++}
++
++static void NETCAST_VideoQuit(_THIS)
++{
++    nc_shutdown();
++}
++
++static void NETCAST_GetDisplayModes(_THIS, SDL_VideoDisplay *display)
++{
++    SDL_AddDisplayMode(display, &display->current_mode);
++}
++
++static int NETCAST_SetDisplayMode(_THIS, SDL_VideoDisplay *display, SDL_DisplayMode *mode)
++{
++    return 0;
++}
++
++static int NETCAST_CreateWindow(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data;
++
++    if (netcast_window) {
++        return SDL_SetError("netcast: only one window is supported");
++    }
++    data = (SDL_WindowData *)SDL_calloc(1, sizeof(SDL_WindowData));
++    if (!data) {
++        return SDL_OutOfMemory();
++    }
++    window->driverdata = data;
++    /* the HOA window is fixed: fullscreen 1280x720 */
++    window->x = 0;
++    window->y = 0;
++    window->w = NETCAST_W;
++    window->h = NETCAST_H;
++    window->flags |= SDL_WINDOW_FULLSCREEN | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS;
++    window->flags &= ~SDL_WINDOW_RESIZABLE;
++
++    if (!_this->egl_data && SDL_GL_LoadLibrary(NULL) < 0) {
++        return -1;
++    }
++    data->egl_surface = SDL_EGL_CreateSurface(_this, (NativeWindowType)(uintptr_t)nc_window_id());
++    if (data->egl_surface == EGL_NO_SURFACE) {
++        return SDL_SetError("netcast: can't create EGL surface on window %u", nc_window_id());
++    }
++    netcast_window = window;
++    /* SDL_CreateRenderer recreates non-GL windows (Hide + Create); SDL won't call
++     * ShowWindow again because we report SHOWN, so make the HOA window visible here. */
++    nc_set_visible(1);
++    if (nc_debug < 0) { const char *e = SDL_getenv("NC_DEBUG"); nc_debug = e && *e == '1'; }
++    if (nc_debug) nc_log("netcast: CreateWindow flags=%08x", window->flags);
++    SDL_SetMouseFocus(window);
++    SDL_SetKeyboardFocus(window);
++    return 0;
++}
++
++static void NETCAST_DestroyWindow(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++    if (data) {
++        if (data->egl_surface != EGL_NO_SURFACE) {
++            SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++            SDL_EGL_DestroySurface(_this, data->egl_surface);
++        }
++        SDL_free(data);
++        window->driverdata = NULL;
++    }
++    if (window == netcast_window) {
++        netcast_window = NULL;
++    }
++}
++
++static void NETCAST_ShowWindow(_THIS, SDL_Window *window) { if (nc_debug == 1) nc_log("netcast: ShowWindow"); nc_set_visible(1); }
++static void NETCAST_HideWindow(_THIS, SDL_Window *window) { if (nc_debug == 1) nc_log("netcast: HideWindow"); nc_set_visible(0); }
++static void NETCAST_SetWindowFullscreen(_THIS, SDL_Window *window, SDL_VideoDisplay *display, SDL_bool fullscreen)
++{
++    if (nc_debug == 1) nc_log("netcast: SetWindowFullscreen(%d)", fullscreen);
++}
++static void NETCAST_MinimizeWindow(_THIS, SDL_Window *window) { if (nc_debug == 1) nc_log("netcast: MinimizeWindow (ignored)"); }
++
++static void NETCAST_DeleteDevice(SDL_VideoDevice *device)
++{
++    SDL_free(device);
++}
++
++static SDL_VideoDevice *NETCAST_CreateDevice(void)
++{
++    SDL_VideoDevice *device = (SDL_VideoDevice *)SDL_calloc(1, sizeof(SDL_VideoDevice));
++    if (!device) {
++        SDL_OutOfMemory();
++        return NULL;
++    }
++    device->free = NETCAST_DeleteDevice;
++    device->VideoInit = NETCAST_VideoInit;
++    device->VideoQuit = NETCAST_VideoQuit;
++    device->GetDisplayModes = NETCAST_GetDisplayModes;
++    device->SetDisplayMode = NETCAST_SetDisplayMode;
++    device->CreateSDLWindow = NETCAST_CreateWindow;
++    device->DestroyWindow = NETCAST_DestroyWindow;
++    device->ShowWindow = NETCAST_ShowWindow;
++    device->HideWindow = NETCAST_HideWindow;
++    device->SetWindowFullscreen = NETCAST_SetWindowFullscreen;
++    device->MinimizeWindow = NETCAST_MinimizeWindow;
++    device->PumpEvents = NETCAST_PumpEvents;
++
++    device->GL_LoadLibrary = NETCAST_GLES_LoadLibrary;
++    device->GL_GetProcAddress = SDL_EGL_GetProcAddress;
++    device->GL_UnloadLibrary = SDL_EGL_UnloadLibrary;
++    device->GL_CreateContext = NETCAST_GLES_CreateContext;
++    device->GL_MakeCurrent = NETCAST_GLES_MakeCurrent;
++    device->GL_SetSwapInterval = SDL_EGL_SetSwapInterval;
++    device->GL_GetSwapInterval = SDL_EGL_GetSwapInterval;
++    device->GL_SwapWindow = NETCAST_GLES_SwapWindow;
++    device->GL_DeleteContext = SDL_EGL_DeleteContext;
++    return device;
++}
++
++VideoBootStrap NETCAST_bootstrap = {
++    "netcast", "LG NetCast (HOA GX + PowerVR EGL)",
++    NETCAST_CreateDevice,
++    NULL /* no ShowMessageBox */
++};
++
++#endif /* SDL_VIDEO_DRIVER_NETCAST */
+--- a/src/video/SDL_sysvideo.h	2025-05-19 17:24:41.000000000 -0400
++++ b/src/video/SDL_sysvideo.h	2026-11-19 23:28:57.999507327 -0500
+@@ -470,6 +470,7 @@
+ extern VideoBootStrap VITA_bootstrap;
+ extern VideoBootStrap RISCOS_bootstrap;
+ extern VideoBootStrap N3DS_bootstrap;
++extern VideoBootStrap NETCAST_bootstrap;
+ extern VideoBootStrap RPI_bootstrap;
+ extern VideoBootStrap KMSDRM_bootstrap;
+ extern VideoBootStrap KMSDRM_LEGACY_bootstrap;
+--- a/src/video/SDL_video.c	2025-05-19 17:24:41.000000000 -0400
++++ b/src/video/SDL_video.c	2026-11-19 23:28:57.999507327 -0500
+@@ -123,6 +123,9 @@
+ #ifdef SDL_VIDEO_DRIVER_RISCOS
+     &RISCOS_bootstrap,
+ #endif
++#ifdef SDL_VIDEO_DRIVER_NETCAST
++    &NETCAST_bootstrap,
++#endif
+ #ifdef SDL_VIDEO_DRIVER_RPI
+     &RPI_bootstrap,
+ #endif

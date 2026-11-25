@@ -1,0 +1,57 @@
+diff -ruN a/drivers/i2c/busses/Kconfig b/drivers/i2c/busses/Kconfig
+--- a/drivers/i2c/busses/Kconfig
++++ b/drivers/i2c/busses/Kconfig
+@@ -884,6 +884,14 @@
+ 	  Say Y here to include support for I2C controller in the
+ 	  MediaTek MT7621/MT7628 SoCs.
+ 
++config I2C_MT5398_SIF
++	tristate "MediaTek MT5398 SIF I2C master"
++	depends on OF
++	help
++	  The SIF engine of the MediaTek MT5398 TV SoC (LG NetCast), one
++	  master muxed onto MediaTek's system, tuner or second I2C pads.
++	  On LG NetCast TVs the MICOM (power, backlight) is on the tuner pads.
++
+ config I2C_MV64XXX
+ 	tristate "Marvell mv64xxx I2C Controller"
+ 	depends on PLAT_ORION || ARCH_SUNXI || ARCH_MVEBU || COMPILE_TEST
+diff -ruN a/drivers/i2c/busses/Makefile b/drivers/i2c/busses/Makefile
+--- a/drivers/i2c/busses/Makefile
++++ b/drivers/i2c/busses/Makefile
+@@ -85,6 +85,7 @@
+ obj-$(CONFIG_I2C_MPC)		+= i2c-mpc.o
+ obj-$(CONFIG_I2C_MT65XX)	+= i2c-mt65xx.o
+ obj-$(CONFIG_I2C_MT7621)	+= i2c-mt7621.o
++obj-$(CONFIG_I2C_MT5398_SIF)	+= i2c-mt5398-sif.o
+ obj-$(CONFIG_I2C_MV64XXX)	+= i2c-mv64xxx.o
+ obj-$(CONFIG_I2C_MXS)		+= i2c-mxs.o
+ obj-$(CONFIG_I2C_NOMADIK)	+= i2c-nomadik.o
+diff -ruN a/drivers/video/backlight/Kconfig b/drivers/video/backlight/Kconfig
+--- a/drivers/video/backlight/Kconfig
++++ b/drivers/video/backlight/Kconfig
+@@ -464,6 +464,13 @@
+ 	help
+ 	  If you have a Sanyo LV5207LP say Y to enable the backlight driver.
+ 
++config BACKLIGHT_LG_MICOM
++	tristate "LG NetCast MICOM backlight"
++	depends on I2C
++	help
++	  On/off control of the panel backlight of LG NetCast TVs through
++	  the MICOM (LG's standby microcontroller) over I2C.
++
+ config BACKLIGHT_BD6107
+ 	tristate "Rohm BD6107 Backlight"
+ 	depends on I2C
+diff -ruN a/drivers/video/backlight/Makefile b/drivers/video/backlight/Makefile
+--- a/drivers/video/backlight/Makefile
++++ b/drivers/video/backlight/Makefile
+@@ -39,6 +39,7 @@
+ obj-$(CONFIG_BACKLIGHT_LM3509)		+= lm3509_bl.o
+ obj-$(CONFIG_BACKLIGHT_LM3533)		+= lm3533_bl.o
+ obj-$(CONFIG_BACKLIGHT_LM3630A)		+= lm3630a_bl.o
++obj-$(CONFIG_BACKLIGHT_LG_MICOM)	+= lg-micom-bl.o
+ obj-$(CONFIG_BACKLIGHT_LM3639)		+= lm3639_bl.o
+ obj-$(CONFIG_BACKLIGHT_LOCOMO)		+= locomolcd.o
+ obj-$(CONFIG_BACKLIGHT_LP855X)		+= lp855x_bl.o

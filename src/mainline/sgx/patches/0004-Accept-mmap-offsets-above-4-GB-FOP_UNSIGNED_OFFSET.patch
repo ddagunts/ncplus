@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dmitry Dagunts <ddagunts@gmail.com>
+Date: Tue, 24 Nov 2026 16:10:00 -0500
+Subject: [PATCH 4/4] Accept mmap offsets above 4 GB (FOP_UNSIGNED_OFFSET)
+
+mmap handles start at FIRST_SPECIAL_PFN = 0x80000000 pages. Since 4.17 do_mmap()
+returns -EOVERFLOW for such offsets on a character device unless its file_operations
+set FOP_UNSIGNED_OFFSET, so LG's pvrsrvinit could not map anything and exited 1.
+---
+diff --git a/services4/srvkm/env/linux/module.c b/services4/srvkm/env/linux/module.c
+index 8780191..4ad6090 100644
+--- a/services4/srvkm/env/linux/module.c
++++ b/services4/srvkm/env/linux/module.c
+@@ -206,6 +206,11 @@ static struct file_operations pvrsrv_fops =
+ 	.open=PVRSRVOpen,
+ 	.release=PVRSRVRelease,
+ 	.mmap=PVRMMap,
++	/*
++	 * mmap offsets are handles from FIRST_SPECIAL_PFN (0x80000000 pages) up; since 4.17
++	 * do_mmap() refuses offsets above 4 GB on a character device without this flag.
++	 */
++	.fop_flags=FOP_UNSIGNED_OFFSET,
+ };
+ #endif
+ 
+-- 
+2.47

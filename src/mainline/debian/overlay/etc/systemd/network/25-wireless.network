@@ -1,0 +1,14 @@
+# USB Wi-Fi (carl9170 dongles, e.g. wlx<mac>), associated by netcast-wifi@.service: DHCP.
+# A higher route metric than the wired 20-wired.network, so Ethernet wins when both are up.
+[Match]
+Type=wlan
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+SendHostname=yes
+RouteMetric=2048
+
+[IPv6AcceptRA]
+RouteMetric=2048

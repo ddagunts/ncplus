@@ -1,0 +1,10 @@
+#!/bin/sh
+# Opt-in display test for the mt5398_osd KMS driver (netcast-gfxtest.service): runs when
+# <stick>/netcast/mainline/gfxtest exists. The test itself lives on the stick
+# (src/mainline/gfxtest.sh -> <stick>/netcast/mainline/gfxtest.sh), so changing it needs no
+# new debian.img. It logs to the kernel log (ramoops; tools/ramlog.py from stock).
+M=/mnt/stick/netcast/mainline
+if [ -f $M/gfxtest.sh ]; then
+	exec sh $M/gfxtest.sh
+fi
+echo "gfxtest: $M/gfxtest exists but $M/gfxtest.sh doesn't" > /dev/kmsg

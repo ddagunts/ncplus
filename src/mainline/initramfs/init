@@ -1,0 +1,191 @@
+#!/bin/busybox sh
+# PID 1 of the mainline test boot. Everything it reports goes through /dev/kmsg, so it
+# shows on the panel (fbcon) AND lands in the ramoops console log that survives the
+# watchdog reset; after the countdown it reboots back to LG's software. Read the log from
+# stock afterwards with tools/ramlog.py.
+#
+# USB: lists what enumerated, gives a USB keyboard a shell on tty2 (Alt+F2), and runs DHCP
+# on every USB Ethernet interface. With an address it starts telnetd (port 23, no login,
+# like the stock TV's) and stays up longer; `touch /tmp/stay` from that shell stops the
+# countdown, `reboot -f` goes back to stock.
+#
+# Debian: if a USB partition holds netcast/mainline/debian.img (an ext4 image built by
+# third_party/build-debian.sh), init loop-mounts it, arms the watchdog (/dev/watchdog,
+# 150 s; systemd takes over feeding it) and switch_roots into its /sbin/init. Without the
+# image it falls back to the busybox report/telnet flow below.
+#
+# Kernel command line: netcast.reboot=<s> overrides the countdown (default 30, or 600 once
+# the network is up; Debian reads it too, default 0 = stay). netcast.root=<path on the stick>
+# picks another image, netcast.root=none stays in this initramfs.
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+exec </dev/tty0 >/dev/tty0 2>&1
+
+log() { while IFS= read -r l; do echo "init: $l" > /dev/kmsg; done; }
+say() { echo "$*" | log; }
+
+REBOOT_IN=30
+for a in $(cat /proc/cmdline); do
+	case "$a" in
+	netcast.reboot=*) REBOOT_ARG=${a#*=} ;;
+	netcast.root=*) ROOT_IMG=${a#*=} ;;
+	esac
+done
+ROOT_IMG=${ROOT_IMG:-netcast/mainline/debian.img}
+
+say "=== NetCast mainline: $(uname -sr) on $(sed -n 's/^Hardware[^:]*: //p' /proc/cpuinfo)"
+say "--- memory";      grep -E 'MemTotal|MemFree|HighTotal' /proc/meminfo | log
+say "--- cpus: online $(cat /sys/devices/system/cpu/online 2>/dev/null)"; dmesg | grep -E "mt5398-smp|CPU1|SMP:" | log
+say "--- audio: $(cat /proc/asound/cards 2>/dev/null | head -1)"; dmesg | grep -E "mt5398-mixsnd" | log
+say "--- interrupts";  log < /proc/interrupts
+say "--- clocksource"; log < /sys/devices/system/clocksource/clocksource0/current_clocksource
+say "--- framebuffer"; log < /proc/fb
+cat /sys/class/graphics/fb0/virtual_size /sys/class/graphics/fb0/stride 2>/dev/null | log
+for f in /proc/device-tree/chosen/framebuffer@*/nckexec,osd-readback; do
+	# nckexec's view of the 1080p switch: region w4 (want f0438780), w1, SC3 src (07800438), SC3 ctrl
+	[ -f "$f" ] && say "OSD readback: $(hexdump -v -e '4/1 "%02x" " "' "$f")"
+done
+# KMS takeover (mt5398_osd): its header dump, the connector, and which fbdev fbcon is on
+say "--- display"
+dmesg | grep -i -E 'mt5398-osd|simple-framebuffer|simplefb|\[drm\]|fbcon|aperture' | log
+for c in /sys/class/drm/card*-*; do
+	[ -d "$c" ] && say "${c##*/}: $(cat $c/status) $(cat $c/enabled) modes: $(tr '\n' ' ' < $c/modes)"
+done
+for f in /sys/class/graphics/fb*; do
+	[ -d "$f" ] && say "${f##*/}: $(cat $f/name) $(cat $f/virtual_size) stride $(cat $f/stride)"
+done
+say "--- iomem";       log < /proc/iomem
+
+mkdir -p /sys/fs/pstore
+mount -t pstore pstore /sys/fs/pstore && say "--- pstore (previous mainline boot): $(ls /sys/fs/pstore | tr '\n' ' ')"
+[ -c /dev/pmsg0 ] && echo "netcast init: pmsg alive at $(cut -d' ' -f1 /proc/uptime)s" > /dev/pmsg0
+
+# --- USB: give enumeration (and the PHY reset in the glue) a few seconds
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+say "--- usb"
+n=0
+while [ $n -lt 8 ]; do
+	sleep 1
+	n=$((n + 1))
+	[ $n -ge 4 ] || continue
+	ls /sys/class/net | grep -q -v -x lo && break
+	[ "$ROOT_IMG" != none ] && ls /sys/class/block | grep -q '^sd' && break
+done
+[ "$ROOT_IMG" != none ] && ls /sys/class/block | grep -q '^sd' && sleep 1	# partitions
+for d in /sys/bus/usb/devices/*; do
+	[ -f "$d/idVendor" ] || continue
+	say "usb ${d##*/}: $(cat $d/idVendor):$(cat $d/idProduct) speed=$(cat $d/speed) $(cat $d/manufacturer 2>/dev/null) $(cat $d/product 2>/dev/null)"
+done
+dmesg | grep -i -E 'musb|bim|usb|hid|eth|r8152|asix|ax88179|cdc|carl9170|ieee80211|cfg80211|wlan' | tail -n 40 | log
+grep -i -E 'bim|musb' /proc/interrupts | log
+
+# --- Debian on the stick: loop-mount the image and hand PID 1 over to its systemd
+debian() {
+	[ "$ROOT_IMG" = none ] && return
+	mkdir -p /stick /newroot
+	for p in $(ls /sys/class/block | grep '^sd'); do
+		mount -t vfat -o noatime "/dev/$p" /stick 2>/dev/null || continue
+		[ -f "/stick/$ROOT_IMG" ] && break
+		umount /stick
+	done
+	mountpoint -q /stick || { say "debian: no $ROOT_IMG on any USB partition"; return; }
+	say "debian: /dev/$p:/$ROOT_IMG ($(($(stat -c %s "/stick/$ROOT_IMG") >> 20)) MB)"
+	mount -t ext4 -o loop,rw,noatime "/stick/$ROOT_IMG" /newroot 2>&1 | log
+	if ! mountpoint -q /newroot; then
+		say "debian: mounting the image failed"
+		umount /stick
+		return
+	fi
+	ver="$(cat /newroot/etc/debian_version 2>/dev/null)"
+	if [ ! -x /newroot/sbin/init ] && [ ! -L /newroot/sbin/init ]; then
+		say "debian: image has no /sbin/init (debian_version '$ver')"
+		umount /newroot /stick
+		return
+	fi
+	say "debian: $ver, $(df -m /newroot | awk 'NR==2 {print $3 " of " $2 " MB used"}')"
+	mkdir -p /newroot/mnt/stick
+	mount --move /stick /newroot/mnt/stick
+	# Arm the watchdog: open + close without the magic 'V' leaves it running (150 s, from
+	# the DTS). systemd opens it again almost at once (RuntimeWatchdogSec); a boot that
+	# never gets that far resets the TV back to the stock software.
+	if [ -c /dev/watchdog ]; then
+		echo > /dev/watchdog && say "debian: watchdog armed ($(dmesg | sed -n 's/.*mt5398-wdt[^:]*: //p' | tail -n 1))"
+	else
+		say "debian: no /dev/watchdog: a hung boot will need a power cycle"
+	fi
+	# SGX544 bring-up, opt-in: <stick>/netcast/mainline/sgx holds id | reset | park. Only
+	# with the watchdog running: a read of a gated GPU can hang the bus, and the watchdog
+	# then resets to stock (the ramoops log shows how far it got).
+	sgx_action=$(cat /newroot/mnt/stick/netcast/mainline/sgx 2>/dev/null | tr -d ' \r\n')
+	sgx_dev=$(ls -d /sys/bus/platform/devices/*.gpu 2>/dev/null | head -n 1)
+	if [ -n "$sgx_action" ] && [ -c /dev/watchdog ] && [ -n "$sgx_dev" ]; then
+		say "sgx: '$sgx_action' on ${sgx_dev##*/}"
+		sync
+		{ echo "$sgx_action" > "$sgx_dev/action"; } 2>&1 | log
+		log < "$sgx_dev/report"
+	fi
+	if [ "${REBOOT_ARG:-0}" = 0 ]; then
+		say "=== switch_root to Debian $ver (systemd), staying (reboot to return to stock)"
+	else
+		say "=== switch_root to Debian $ver (systemd), back to stock in ${REBOOT_ARG}s unless /run/stay"
+	fi
+	sync
+	mount --move /sys /newroot/sys
+	mount --move /proc /newroot/proc
+	mount --move /dev /newroot/dev
+	exec switch_root /newroot /sbin/init
+}
+debian
+
+# a shell on tty2 for a USB keyboard (Alt+F2 on the panel)
+if [ -c /dev/tty2 ]; then
+	( while :; do setsid -c sh </dev/tty2 >/dev/tty2 2>&1; sleep 1; done ) &
+fi
+
+say "--- network"
+ip link set lo up
+NET=
+for i in $(ls /sys/class/net); do
+	[ "$i" = lo ] && continue
+	say "$i: mac $(cat /sys/class/net/$i/address) driver $(basename $(readlink /sys/class/net/$i/device/driver) 2>/dev/null)"
+	ip link set "$i" up
+	# no carrier = no lease; CDC NCM reports the link on its interrupt endpoint
+	c=0
+	while [ "$(cat /sys/class/net/$i/carrier 2>/dev/null)" != 1 ] && [ $c -lt 10 ]; do sleep 1; c=$((c + 1)); done
+	say "$i: carrier=$(cat /sys/class/net/$i/carrier 2>/dev/null) operstate=$(cat /sys/class/net/$i/operstate) after ${c}s"
+	if udhcpc -i "$i" -s /etc/udhcpc.script -n -q -t 6 -T 2 >/dev/null 2>&1; then
+		say "$i: $(ip -4 addr show dev $i | sed -n 's/^ *inet \([^ ]*\).*/\1/p') via $(ip route | sed -n 's/^default via \([^ ]*\).*/\1/p')"
+		NET=$i
+	else
+		say "$i: no DHCP lease"
+	fi
+done
+if [ -n "$NET" ]; then
+	telnetd -l /bin/sh && say "telnetd up on $NET port 23 (no login)"
+	REBOOT_IN=600
+fi
+[ -n "$REBOOT_ARG" ] && REBOOT_IN=$REBOOT_ARG
+
+say "--- kernel warnings"; dmesg | grep -i -E 'warn|error|fail|bug|pstore|ramoops|reboot' | tail -n 16 | log
+say "=== userspace up; rebooting to LG's software in ${REBOOT_IN}s (watchdog restart test)"
+
+n=0
+while [ $n -lt "$REBOOT_IN" ]; do
+	sleep 5
+	n=$((n + 5))
+	printf '\ralive %4ds  uptime %s ' "$n" "$(cut -d' ' -f1 /proc/uptime)"
+	if [ -e /tmp/stay ]; then
+		echo
+		say "=== /tmp/stay: countdown stopped; reboot -f returns to stock"
+		while :; do sleep 60; done
+	fi
+done
+echo
+say "=== reboot -f at $(cut -d' ' -f1 /proc/uptime)s"
+sync
+reboot -f
+sleep 5
+say "reboot -f returned: no working restart handler. Power-cycle the TV."
+while :; do sleep 60; done

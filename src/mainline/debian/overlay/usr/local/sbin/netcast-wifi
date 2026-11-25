@@ -1,0 +1,51 @@
+#!/bin/sh
+# netcast-wifi <out.conf>: make a wpa_supplicant config from <stick>/netcast/mainline/wifi.conf.
+# Exit 1 (netcast-wifi@.service is then skipped) when there is no file or no network in it.
+#
+# wifi.conf is either a full wpa_supplicant.conf (anything with "network={" in it is used
+# as it is: several networks, WPA-Enterprise, ...) or these lines:
+#   ssid=My network        (the name exactly as it is, no quotes)
+#   psk=my passphrase      (8-63 characters, or 64 hex digits; empty or missing = open network)
+#   country=US             (optional: the regulatory domain, two letters)
+src=/mnt/stick/netcast/mainline/wifi.conf
+out=$1
+[ -f "$src" ] || { echo "netcast-wifi: no $src"; exit 1; }
+umask 077
+mkdir -p "$(dirname "$out")"
+if grep -q 'network={' "$src"; then
+	tr -d '\r' < "$src" > "$out"
+	grep -q '^ctrl_interface=' "$out" || sed -i '1i ctrl_interface=/run/wpa_supplicant' "$out"
+	exit 0
+fi
+val() { tr -d '\r' < "$src" | sed -n "s/^[[:space:]]*$1=//p" | head -n 1; }
+ssid=$(val ssid)
+psk=$(val psk)
+country=$(val country | tr -d ' ' | tr a-z A-Z)
+[ -n "$ssid" ] || { echo "netcast-wifi: no ssid= in $src"; exit 1; }
+n=$(printf %s "$psk" | wc -c)
+if [ -n "$psk" ] && ! printf %s "$psk" | grep -qE '^[0-9a-fA-F]{64}$' && { [ "$n" -lt 8 ] || [ "$n" -gt 63 ]; }; then
+	echo "netcast-wifi: psk must be 8-63 characters or 64 hex digits (it has $n)"
+	exit 1
+fi
+hex=$(printf %s "$ssid" | od -An -v -tx1 | tr -d ' \n')
+{
+	echo "ctrl_interface=/run/wpa_supplicant"
+	case "$country" in [A-Z][A-Z]) echo "country=$country" ;; esac
+	echo "network={"
+	echo "	ssid=$hex"
+	echo "	scan_ssid=1"
+	if [ -z "$psk" ]; then
+		echo "	key_mgmt=NONE"
+	elif printf %s "$psk" | grep -qE '^[0-9a-fA-F]{64}$'; then
+		echo "	key_mgmt=WPA-PSK WPA-PSK-SHA256"
+		echo "	psk=$psk"
+	else
+		# WPA2 or WPA3 (SAE), whichever the network offers
+		echo "	key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE"
+		echo "	ieee80211w=1"
+		echo "	psk=\"$psk\""
+		echo "	sae_password=\"$psk\""
+	fi
+	echo "}"
+} > "$out"
+echo "netcast-wifi: network \"$ssid\"${country:+, country $country}"

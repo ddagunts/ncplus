@@ -1,0 +1,14 @@
+# Opt-in display test (modetest page flips, then weston), logged to the kernel log.
+# Create <stick>/netcast/mainline/gfxtest to run it once per boot.
+[Unit]
+Description=NetCast: display test (modetest, weston)
+ConditionPathExists=/mnt/stick/netcast/mainline/gfxtest
+After=systemd-udev-settle.service systemd-user-sessions.service getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/netcast-gfxtest
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

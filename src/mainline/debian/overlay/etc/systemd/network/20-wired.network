@@ -1,0 +1,9 @@
+# Any wired interface (the USB Ethernet adapter, e.g. enx<mac> for the AX88179B): DHCP.
+[Match]
+Type=ether
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+SendHostname=yes

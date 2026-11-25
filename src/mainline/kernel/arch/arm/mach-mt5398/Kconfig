@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+config ARCH_MT5398
+	bool "MediaTek MT5398 (LG NetCast TVs)"
+	depends on ARCH_MULTI_V7
+	select ARM_GIC
+	select ARM_GLOBAL_TIMER
+	select HAVE_ARM_SCU if SMP
+	help
+	  MediaTek MT5398 TV SoC (2x Cortex-A9), as in LG NetCast 4.x TVs,
+	  where the kernel is warm-booted from the stock one by nckexec.
+	  Provides the "netcast,mt5398-smp" enable-method: the second core
+	  is released from the hold page nckexec parks it in.

@@ -1,0 +1,4 @@
+# Every Wi-Fi interface gets wpa_supplicant with the credentials from the stick
+# (netcast-wifi@.service; it does nothing without <stick>/netcast/mainline/wifi.conf).
+# After 80-net-setup-link.rules, so $name is the final name (wlx<mac>).
+SUBSYSTEM=="net", ACTION=="add", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="netcast-wifi@$name.service"

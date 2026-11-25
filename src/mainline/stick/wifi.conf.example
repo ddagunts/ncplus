@@ -1,0 +1,11 @@
+# EXAMPLE: this file is not read. Copy it to "wifi.conf" in the same folder
+# (netcast/mainline/ on the stick; no ".example" or ".txt" at the end) and edit the copy.
+#
+# Wi-Fi for Debian, with a USB Wi-Fi adapter on an Atheros AR9170 chip (carl9170 driver),
+# e.g. the Netgear WN111v2. The TV's built-in Wi-Fi has no Linux driver.
+# Remove the "#" in front of the lines below and fill them in. The name and the passphrase
+# are taken exactly as written (spaces included, no quotes). No psk line = an open network.
+# A full wpa_supplicant.conf also works.
+#ssid=My network
+#psk=my passphrase
+#country=US

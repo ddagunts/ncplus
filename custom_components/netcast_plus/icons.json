@@ -1,0 +1,30 @@
+{
+  "entity": {
+    "remote": {
+      "remote": {
+        "default": "mdi:remote-tv"
+      }
+    },
+    "sensor": {
+      "current_app": {
+        "default": "mdi:application-outline"
+      }
+    },
+    "select": {
+      "screen_saver": {
+        "default": "mdi:monitor-shimmer"
+      }
+    },
+    "switch": {
+      "keep_awake": {
+        "default": "mdi:sleep-off"
+      },
+      "lite_mode": {
+        "default": "mdi:memory"
+      },
+      "wifi_keepalive": {
+        "default": "mdi:wifi-sync"
+      }
+    }
+  }
+}

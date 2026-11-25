@@ -1,0 +1,55 @@
+diff -ruN a/drivers/irqchip/Kconfig b/drivers/irqchip/Kconfig
+--- a/drivers/irqchip/Kconfig
++++ b/drivers/irqchip/Kconfig
+@@ -741,4 +741,13 @@
+ 	  chained controller, routing all interrupt source in P-Chip to
+ 	  the primary controller on C-Chip.
+ 
++config MT5398_BIM
++	bool "MediaTek MT5398 BIM interrupt gate"
++	depends on ARM && OF
++	select IRQ_DOMAIN_HIERARCHY
++	select IRQ_FASTEOI_HIERARCHY_HANDLERS
++	help
++	  The MT53xx TV SoCs pass every peripheral interrupt through the BIM
++	  (enable + latch per line) in front of the Cortex-A9 GIC.
++
+ endmenu
+diff -ruN a/drivers/irqchip/Makefile b/drivers/irqchip/Makefile
+--- a/drivers/irqchip/Makefile
++++ b/drivers/irqchip/Makefile
+@@ -69,6 +69,7 @@
+ obj-$(CONFIG_KEYSTONE_IRQ)		+= irq-keystone.o
+ obj-$(CONFIG_MIPS_GIC)			+= irq-mips-gic.o
+ obj-$(CONFIG_ARCH_MEDIATEK)		+= irq-mtk-sysirq.o irq-mtk-cirq.o
++obj-$(CONFIG_MT5398_BIM)		+= irq-mt5398-bim.o
+ obj-$(CONFIG_ARCH_DIGICOLOR)		+= irq-digicolor.o
+ obj-$(CONFIG_ARCH_SA1100)		+= irq-sa11x0.o
+ obj-$(CONFIG_INGENIC_IRQ)		+= irq-ingenic.o
+diff -ruN a/drivers/usb/musb/Kconfig b/drivers/usb/musb/Kconfig
+--- a/drivers/usb/musb/Kconfig
++++ b/drivers/usb/musb/Kconfig
+@@ -111,6 +111,12 @@
+ 	select GENERIC_PHY
+ 	select USB_ROLE_SWITCH
+ 
++config USB_MUSB_MT5398
++	tristate "MediaTek MT5398 TV SoC (host, PIO)"
++	depends on OF && USB_MUSB_HOST
++	help
++	  The four Mentor MUSB host ports of the MediaTek MT5398 (LG NetCast).
++
+ config USB_MUSB_POLARFIRE_SOC
+ 	tristate "Microchip PolarFire SoC platforms"
+ 	depends on ARCH_MICROCHIP_POLARFIRE || COMPILE_TEST
+diff -ruN a/drivers/usb/musb/Makefile b/drivers/usb/musb/Makefile
+--- a/drivers/usb/musb/Makefile
++++ b/drivers/usb/musb/Makefile
+@@ -23,6 +23,7 @@
+ obj-$(CONFIG_USB_MUSB_JZ4740)			+= jz4740.o
+ obj-$(CONFIG_USB_MUSB_SUNXI)			+= sunxi.o
+ obj-$(CONFIG_USB_MUSB_MEDIATEK)      		+= mediatek.o
++obj-$(CONFIG_USB_MUSB_MT5398)			+= mt5398.o
+ obj-$(CONFIG_USB_MUSB_POLARFIRE_SOC)		+= mpfs.o
+ 
+ # the kconfig must guarantee that only one of the

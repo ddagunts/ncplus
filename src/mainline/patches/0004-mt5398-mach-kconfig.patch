@@ -1,0 +1,23 @@
+diff -ruN a/arch/arm/Kconfig b/arch/arm/Kconfig
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -411,6 +411,8 @@
+ 
+ source "arch/arm/mach-mstar/Kconfig"
+ 
++source "arch/arm/mach-mt5398/Kconfig"
++
+ source "arch/arm/mach-mv78xx0/Kconfig"
+ 
+ source "arch/arm/mach-mvebu/Kconfig"
+diff -ruN a/arch/arm/Makefile b/arch/arm/Makefile
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -202,6 +202,7 @@
+ machine-$(CONFIG_ARCH_MILBEAUT)		+= milbeaut
+ machine-$(CONFIG_ARCH_MXS)		+= mxs
+ machine-$(CONFIG_ARCH_MSTARV7)		+= mstar
++machine-$(CONFIG_ARCH_MT5398)		+= mt5398
+ machine-$(CONFIG_ARCH_NOMADIK)		+= nomadik
+ machine-$(CONFIG_ARCH_NPCM)		+= npcm
+ machine-$(CONFIG_ARCH_OMAP1)		+= omap1

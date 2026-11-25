@@ -1,0 +1,2 @@
+# The desktop user (Xfce, autologin by lightdm). Root on tty1 has no password either.
+tv ALL=(ALL) NOPASSWD: ALL

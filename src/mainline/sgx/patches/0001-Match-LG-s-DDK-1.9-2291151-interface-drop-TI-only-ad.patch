@@ -1,0 +1,363 @@
+From 44d2e171c2270e2d20aa576f9648b0706d32c478 Mon Sep 17 00:00:00 2001
+From: Dmitry Dagunts <ddagunts@gmail.com>
+Date: Mon, 23 Nov 2026 23:02:45 -0500
+Subject: [PATCH 1/3] Match LG's DDK 1.9@2291151 interface: drop TI-only
+ additions
+
+The TV's userspace (libsrv_um.so etc., DDK 1.9@2291151 cobra_lg_linux) is
+built against IMG's 1.9 interface; TI's tag adds to it:
+- PVRSRV_MISC_INFO: cache op regions (sRegions etc.) and the CUSTOM_FLUSH,
+  CUSTOM_INV, CLEAN_REGIONS, INV_REGIONS cache ops (grows the struct and
+  GET_MISC_INFO/GETCLIENTINFO by 88 bytes)
+- bridge commands REMAP_TO_DEV, UNMAP_FROM_DEV, IMPORT_GEM after
+  EXPORT_DEVICEMEM_2, which shift every later bridge number by 4
+- pfnSwapToDCSystem in the display class jump table
+
+Checked against LG's pvrsrvkm.ko: all 195 interface types in the headers
+lay out the same (DWARF), and the bridge dispatch table is identical
+(104 entries).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include4/services.h                          |  20 +-
+ services4/include/kerneldisplay.h            |   1 -
+ services4/include/pvr_bridge.h               |  13 +-
+ services4/srvkm/bridged/bridged_pvr_bridge.c |   7 +-
+ services4/srvkm/common/pvrsrv.c              | 198 -------------------
+ 5 files changed, 9 insertions(+), 230 deletions(-)
+
+diff --git a/include4/services.h b/include4/services.h
+index 8028441..4b99bd1 100644
+--- a/include4/services.h
++++ b/include4/services.h
+@@ -515,11 +515,7 @@ typedef enum
+ {
+ 	PVRSRV_MISC_INFO_CPUCACHEOP_NONE = 0,
+ 	PVRSRV_MISC_INFO_CPUCACHEOP_CLEAN,
+-	PVRSRV_MISC_INFO_CPUCACHEOP_FLUSH,
+-	PVRSRV_MISC_INFO_CPUCACHEOP_CUSTOM_FLUSH,
+-	PVRSRV_MISC_INFO_CPUCACHEOP_CUSTOM_INV,
+-	PVRSRV_MISC_INFO_CPUCACHEOP_CLEAN_REGIONS,
+-	PVRSRV_MISC_INFO_CPUCACHEOP_INV_REGIONS,
++	PVRSRV_MISC_INFO_CPUCACHEOP_FLUSH
+ } PVRSRV_MISC_INFO_CPUCACHEOP_TYPE;
+ 
+ /*!
+@@ -591,20 +587,6 @@ typedef struct _PVRSRV_MISC_INFO_
+ 		/*!< Length of range to perform cache op  */
+ 		IMG_UINT32	ui32Length;
+ 
+-#define PVRSRV_MISC_INFO_MAX_REGIONS 10
+-		/* the following three fields are applicable for
+-		 * PVRSRV_MISC_INFO_CPUCACHEOP_{CLEAN,INV}_REGIONS
+-		 */
+-		IMG_INT32 i32StrideInBytes;
+-		IMG_UINT32 ui32NumRegions;
+-		struct
+-		{
+-			/* note: coordinates are translated to byte offsets by userspace..
+-			 * ie. if the buffer is 32bit/pixel then the pixel coordinates are
+-			 * multiplied by 4 by the caller
+-			 */
+-			IMG_UINT16 x, y, w, h;
+-		} sRegions[PVRSRV_MISC_INFO_MAX_REGIONS];
+ 
+ 	} sCacheOpCtl;
+ 
+diff --git a/services4/include/kerneldisplay.h b/services4/include/kerneldisplay.h
+index dbaf126..18be398 100644
+--- a/services4/include/kerneldisplay.h
++++ b/services4/include/kerneldisplay.h
+@@ -107,7 +107,6 @@ typedef struct PVRSRV_DC_SRV2DISP_KMJTABLE_TAG
+ 	PFN_SET_DC_SRCCK				pfnSetDCSrcColourKey;
+ 	PFN_GET_DC_BUFFERS				pfnGetDCBuffers;
+ 	PFN_SWAP_TO_DC_BUFFER			pfnSwapToDCBuffer;
+-	PFN_SWAP_TO_DC_SYSTEM			pfnSwapToDCSystem;
+ 	PFN_SET_DC_STATE				pfnSetDCState;
+ 	PFN_QUERY_SWAP_COMMAND_ID		pfnQuerySwapCommandID;
+ 
+diff --git a/services4/include/pvr_bridge.h b/services4/include/pvr_bridge.h
+index bf7e3ac..85d8e17 100644
+--- a/services4/include/pvr_bridge.h
++++ b/services4/include/pvr_bridge.h
+@@ -118,18 +118,9 @@ extern "C" {
+ #define PVRSRV_BRIDGE_CHG_DEV_MEM_ATTRIBS		PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+28)
+ #define PVRSRV_BRIDGE_MAP_DEV_MEMORY_2			PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+29)
+ #define PVRSRV_BRIDGE_EXPORT_DEVICEMEM_2		PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+30)
+-#define PVRSRV_BRIDGE_REMAP_TO_DEV				PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+31)
+-#define PVRSRV_BRIDGE_UNMAP_FROM_DEV			PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+32)
+-#define PVRSRV_BRIDGE_IMPORT_GEM				PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+33)
++/* MT5398: no TI REMAP_TO_DEV/UNMAP_FROM_DEV/IMPORT_GEM (31-33); LG's numbering ends here */
++#define PVRSRV_BRIDGE_CORE_CMD_LAST				(PVRSRV_BRIDGE_CORE_CMD_FIRST+30)
+ 
+-#if defined (SUPPORT_ION)
+-#define PVRSRV_BRIDGE_MAP_ION_HANDLE			PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+34)
+-#define PVRSRV_BRIDGE_UNMAP_ION_HANDLE			PVRSRV_IOWR(PVRSRV_BRIDGE_CORE_CMD_FIRST+35)
+-#define PVRSRV_BRIDGE_CORE_CMD_LAST				(PVRSRV_BRIDGE_CORE_CMD_FIRST+36)
+-#else
+-#define PVRSRV_BRIDGE_CORE_CMD_LAST				(PVRSRV_BRIDGE_CORE_CMD_FIRST+34)
+-#endif
+-/* SIM */
+ #define PVRSRV_BRIDGE_SIM_CMD_FIRST				(PVRSRV_BRIDGE_CORE_CMD_LAST+1)
+ #define PVRSRV_BRIDGE_PROCESS_SIMISR_EVENT		PVRSRV_IOWR(PVRSRV_BRIDGE_SIM_CMD_FIRST+0)	/*!< RTSIM pseudo ISR */
+ #define PVRSRV_BRIDGE_REGISTER_SIM_PROCESS		PVRSRV_IOWR(PVRSRV_BRIDGE_SIM_CMD_FIRST+1)	/*!< Register RTSIM process thread */
+diff --git a/services4/srvkm/bridged/bridged_pvr_bridge.c b/services4/srvkm/bridged/bridged_pvr_bridge.c
+index f75e70f..6792d69 100644
+--- a/services4/srvkm/bridged/bridged_pvr_bridge.c
++++ b/services4/srvkm/bridged/bridged_pvr_bridge.c
+@@ -43,7 +43,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+ 
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "img_defs.h"
+ #include "services.h"
+@@ -866,6 +866,7 @@ PVRSRVFreeDeviceMemBW(IMG_UINT32 ui32BridgeID,
+ }
+ 
+ 
++#if defined(PVRSRV_BRIDGE_REMAP_TO_DEV)
+ static IMG_INT
+ PVRSRVRemapToDevBW(IMG_UINT32 ui32BridgeID,
+ 		PVRSRV_BRIDGE_IN_REMAP_TO_DEV *psRemapToDevMemIN,
+@@ -968,6 +969,8 @@ PVRSRVUnmapFromDevBW(IMG_UINT32 ui32BridgeID,
+ }
+ 
+ 
++#endif /* PVRSRV_BRIDGE_REMAP_TO_DEV */
++
+ static IMG_INT
+ PVRSRVExportDeviceMemBW(IMG_UINT32 ui32BridgeID,
+ 					  PVRSRV_BRIDGE_IN_EXPORTDEVICEMEM *psExportDeviceMemIN,
+@@ -5218,8 +5221,10 @@ CommonBridgeInit(IMG_VOID)
+     SetDispatchTableEntry(PVRSRV_BRIDGE_CHG_DEV_MEM_ATTRIBS, PVRSRVChangeDeviceMemoryAttributesBW);
+     SetDispatchTableEntry(PVRSRV_BRIDGE_MAP_DEV_MEMORY_2, PVRSRVMapDeviceMemoryBW);
+     SetDispatchTableEntry(PVRSRV_BRIDGE_EXPORT_DEVICEMEM_2, PVRSRVExportDeviceMemBW);
++#if defined(PVRSRV_BRIDGE_REMAP_TO_DEV)	/* TI only; not in LG's (the TV's) numbering */
+     SetDispatchTableEntry(PVRSRV_BRIDGE_REMAP_TO_DEV, PVRSRVRemapToDevBW);
+     SetDispatchTableEntry(PVRSRV_BRIDGE_UNMAP_FROM_DEV, PVRSRVUnmapFromDevBW);
++#endif
+ #if defined(SUPPORT_DRI_DRM_EXTERNAL)
+     SetDispatchTableEntry(PVRSRV_BRIDGE_IMPORT_GEM, PVRSRVImportGEMBW);
+ #endif /* SUPPORT_DRI_DRM_EXTERNAL */
+diff --git a/services4/srvkm/common/pvrsrv.c b/services4/srvkm/common/pvrsrv.c
+index 6858211..e5ad87c 100644
+--- a/services4/srvkm/common/pvrsrv.c
++++ b/services4/srvkm/common/pvrsrv.c
+@@ -1380,72 +1380,6 @@ PVRSRV_ERROR IMG_CALLCONV PVRSRVGetMiscInfoKM(PVRSRV_MISC_INFO *psMiscInfo)
+ 					return PVRSRV_ERROR_CACHEOP_FAILED;
+ 				}
+ 			}
+-
+-			if ((psMiscInfo->sCacheOpCtl.eCacheOpType == PVRSRV_MISC_INFO_CPUCACHEOP_CLEAN_REGIONS) ||
+-				(psMiscInfo->sCacheOpCtl.eCacheOpType == PVRSRV_MISC_INFO_CPUCACHEOP_INV_REGIONS))
+-			{
+-				IMG_BOOL (*op)(IMG_HANDLE hOSMemHandle, IMG_UINT32 ui32ByteOffset, IMG_VOID *pvRangeAddrStart, IMG_UINT32 ui32Length);
+-				IMG_HANDLE hOSMemHandle = psKernelMemInfo->sMemBlk.hOSMemHandle;
+-				IMG_VOID *pvEndVAddr = psMiscInfo->sCacheOpCtl.pvBaseVAddr +
+-						psMiscInfo->sCacheOpCtl.ui32Length;
+-				int i, j;
+-
+-				if (psMiscInfo->sCacheOpCtl.eCacheOpType == PVRSRV_MISC_INFO_CPUCACHEOP_CLEAN_REGIONS)
+-					op = OSCleanCPUCacheRangeKM;
+-				else
+-					op = OSInvalidateCPUCacheRangeKM;
+-
+-				for (i = 0; i < psMiscInfo->sCacheOpCtl.ui32NumRegions; i++)
+-				{
+-					IMG_UINT32 ui32Length = psMiscInfo->sCacheOpCtl.sRegions[i].w;
+-
+-					/* if length bleeds over into next line, merge all into one range op */
+-					if (ui32Length >= psMiscInfo->sCacheOpCtl.i32StrideInBytes)
+-					{
+-						IMG_VOID *pvBaseVAddr = psMiscInfo->sCacheOpCtl.pvBaseVAddr +
+-								psMiscInfo->sCacheOpCtl.sRegions[i].x +
+-								(psMiscInfo->sCacheOpCtl.sRegions[i].y *
+-										psMiscInfo->sCacheOpCtl.i32StrideInBytes);
+-
+-						ui32Length *= psMiscInfo->sCacheOpCtl.sRegions[i].h;
+-
+-						if(!(*op)(hOSMemHandle, 0, pvBaseVAddr, ui32Length))
+-						{
+-							return PVRSRV_ERROR_CACHEOP_FAILED;
+-						}
+-
+-						continue;
+-					}
+-
+-					for (j = 0; j < psMiscInfo->sCacheOpCtl.sRegions[i].h; j++)
+-					{
+-						IMG_VOID *pvBaseVAddr = psMiscInfo->sCacheOpCtl.pvBaseVAddr +
+-								psMiscInfo->sCacheOpCtl.sRegions[i].x +
+-								((psMiscInfo->sCacheOpCtl.sRegions[i].y+j) *
+-										psMiscInfo->sCacheOpCtl.i32StrideInBytes);
+-
+-						if ((pvBaseVAddr + ui32Length) > pvEndVAddr)
+-						{
+-							printk(KERN_WARNING "out of bounds, %p + %d (%p) > %p (%d, %d) (%d, %d)\n",
+-									pvBaseVAddr, ui32Length, pvBaseVAddr + ui32Length, pvEndVAddr,
+-									i, psMiscInfo->sCacheOpCtl.ui32NumRegions,
+-									j, psMiscInfo->sCacheOpCtl.sRegions[i].h);
+-							ui32Length = pvEndVAddr - pvBaseVAddr;
+-						}
+-
+-						if(!(*op)(hOSMemHandle, 0, pvBaseVAddr, ui32Length))
+-						{
+-							printk(KERN_WARNING "op failed\n");
+-							return PVRSRV_ERROR_CACHEOP_FAILED;
+-						}
+-
+-						if (ui32Length != psMiscInfo->sCacheOpCtl.sRegions[i].w)
+-						{
+-							break;
+-						}
+-					}
+-				}
+-			}
+ 			else if(psMiscInfo->sCacheOpCtl.eCacheOpType == PVRSRV_MISC_INFO_CPUCACHEOP_CLEAN)
+ 			{
+ 				if(!OSCleanCPUCacheRangeKM(psKernelMemInfo->sMemBlk.hOSMemHandle,
+@@ -1456,138 +1390,6 @@ PVRSRV_ERROR IMG_CALLCONV PVRSRVGetMiscInfoKM(PVRSRV_MISC_INFO *psMiscInfo)
+ 					return PVRSRV_ERROR_CACHEOP_FAILED;
+ 				}
+ 			}
+-/* FIXME: Temporary fix needs to be revisited
+- * LinuxMemArea struct listing is not registered for memory areas
+- * wrapped through PVR2DMemWrap() call. For now, we are doing
+- * cache flush/inv range ops by grabbing the physical pages through
+- * get_user_pages() for every blt call.
+- */
+-			else if (psMiscInfo->sCacheOpCtl.eCacheOpType ==
+-						PVRSRV_MISC_INFO_CPUCACHEOP_CUSTOM_FLUSH)
+-			{
+-				/* Sync operation for buffer-to-GPU case */
+-
+-#if defined(CONFIG_OUTER_CACHE)
+-				/* If the size of mem region is more than 500 kB,
+-				 * its beneficial to perform full cache flush
+-				 * than range wise flush, provided full cache
+-				 * operations are supported in the kernel.
+-				 */
+-				if (psMiscInfo->sCacheOpCtl.ui32Length >
+-					PVR_FULL_CACHE_OP_THRESHOLD)
+-				{
+-					OSFlushCPUCacheKM();
+-#if defined(PVR_NO_FULL_CACHE_OPS)
+-					outer_flush_all();
+-#endif
+-				}
+-				else
+-				{
+-					IMG_SIZE_T 	uPageOffset, uPageCount;
+-					IMG_VOID	*pvPageAlignedCPUVAddr;
+-					IMG_SYS_PHYADDR	 	*psIntSysPAddr = IMG_NULL;
+-					IMG_HANDLE	hOSWrapMem = IMG_NULL;
+-					PVRSRV_ERROR eError;
+-					int i;
+-
+-					uPageOffset = (IMG_UINTPTR_T)psMiscInfo->sCacheOpCtl.pvBaseVAddr & (HOST_PAGESIZE() - 1);
+-					uPageCount =
+-						HOST_PAGEALIGN(psMiscInfo->sCacheOpCtl.ui32Length + uPageOffset)/HOST_PAGESIZE();
+-					pvPageAlignedCPUVAddr = (IMG_VOID *)((IMG_UINTPTR_T)psMiscInfo->sCacheOpCtl.pvBaseVAddr - uPageOffset);
+-
+-					if(OSAllocMem(PVRSRV_OS_PAGEABLE_HEAP,
+-						uPageCount * sizeof(IMG_SYS_PHYADDR),
+-						(IMG_VOID **)&psIntSysPAddr, IMG_NULL,
+-						"Array of Page Addresses") != PVRSRV_OK)
+-					{
+-						PVR_DPF((PVR_DBG_ERROR,"PVRSRVWrapExtMemoryKM: Failed to alloc memory for block"));
+-						return PVRSRV_ERROR_OUT_OF_MEMORY;
+-					}
+-
+-					eError = OSAcquirePhysPageAddr(pvPageAlignedCPUVAddr,
+-										uPageCount * HOST_PAGESIZE(),
+-										psIntSysPAddr,
+-										&hOSWrapMem);
+-					for (i = 0; i < uPageCount; i++)
+-					{
+-						outer_flush_range(psIntSysPAddr[i].uiAddr, psIntSysPAddr[i].uiAddr + HOST_PAGESIZE() -1);
+-					}
+-
+-					OSFreeMem(PVRSRV_OS_PAGEABLE_HEAP,
+-						uPageCount * sizeof(IMG_SYS_PHYADDR),
+-						psIntSysPAddr, IMG_NULL);
+-
+-					OSReleasePhysPageAddr(hOSWrapMem);
+-
+-				}
+-
+-#endif /* CONFIG_OUTER_CACHE */
+-			}
+-			else if (psMiscInfo->sCacheOpCtl.eCacheOpType ==
+-							PVRSRV_MISC_INFO_CPUCACHEOP_CUSTOM_INV)
+-			{
+-				/* Sync operation for buffer-from-GPU case */
+-#if defined(CONFIG_OUTER_CACHE)
+-				/* If the size of mem region is more than 500 kB,
+-				 * its beneficial to perform full cache operations
+-				 * then range operations, so here we do full cache
+-				 * flush operation.
+-				 *
+-				 * The clean op resulting from flush should not
+-				 * affect the usecase as the cache lines
+-				 * corresponding to the buffer in question will not
+-				 * be dirty during the GPU update. If they are dirty,
+-				 * the buffer is not synched properly between
+-				 * CPU<-->GPU and the contents are undefined anyway.
+-				 */
+-				if (psMiscInfo->sCacheOpCtl.ui32Length >
+-					PVR_FULL_CACHE_OP_THRESHOLD)
+-				{
+-					OSFlushCPUCacheKM();
+-#if defined(PVR_NO_FULL_CACHE_OPS)
+-					outer_flush_all();
+-#endif
+-				}
+-				else
+-				{
+-					IMG_SIZE_T 	uPageOffset, uPageCount;
+-					IMG_VOID	*pvPageAlignedCPUVAddr;
+-					IMG_SYS_PHYADDR	 	*psIntSysPAddr = IMG_NULL;
+-					IMG_HANDLE	hOSWrapMem = IMG_NULL;
+-					PVRSRV_ERROR eError;
+-					int i;
+-
+-					uPageOffset = (IMG_UINTPTR_T)psMiscInfo->sCacheOpCtl.pvBaseVAddr & (HOST_PAGESIZE() - 1);
+-					uPageCount =
+-						HOST_PAGEALIGN(psMiscInfo->sCacheOpCtl.ui32Length + uPageOffset)/HOST_PAGESIZE();
+-					pvPageAlignedCPUVAddr = (IMG_VOID *)((IMG_UINTPTR_T)psMiscInfo->sCacheOpCtl.pvBaseVAddr - uPageOffset);
+-
+-					if(OSAllocMem(PVRSRV_OS_PAGEABLE_HEAP,
+-						uPageCount * sizeof(IMG_SYS_PHYADDR),
+-						(IMG_VOID **)&psIntSysPAddr, IMG_NULL,
+-						"Array of Page Addresses") != PVRSRV_OK)
+-					{
+-						PVR_DPF((PVR_DBG_ERROR,"PVRSRVWrapExtMemoryKM: Failed to alloc memory for block"));
+-						return PVRSRV_ERROR_OUT_OF_MEMORY;
+-					}
+-
+-					eError = OSAcquirePhysPageAddr(pvPageAlignedCPUVAddr,
+-										uPageCount * HOST_PAGESIZE(),
+-										psIntSysPAddr,
+-										&hOSWrapMem);
+-					for (i = 0; i < uPageCount; i++)
+-					{
+-						outer_inv_range(psIntSysPAddr[i].uiAddr, psIntSysPAddr[i].uiAddr + HOST_PAGESIZE() -1);
+-					}
+-
+-					OSFreeMem(PVRSRV_OS_PAGEABLE_HEAP,
+-						uPageCount * sizeof(IMG_SYS_PHYADDR),
+-						psIntSysPAddr, IMG_NULL);
+-
+-					OSReleasePhysPageAddr(hOSWrapMem);
+-				}
+-#endif /* CONFIG_OUTER_CACHE */
+-			}
+ 		}
+ 	}
+ 
+-- 
+2.47.3
+

@@ -1,0 +1,21 @@
+musb: host: don't add the scatterlist offset twice in the first PIO TX packet
+
+sg_mapping_iter.addr already includes the entry's offset. musb_ep_program() added
+urb->sg->offset again, so the first packet (512 bytes) of a PIO scatter-gather write
+with a nonzero offset was read from the wrong place: silently wrong data on the disk, or,
+with a highmem page, an oops when the sum runs past the page (offset 0x800: mt5398_write_fifo
+faulting at the start of the next, unmapped page). urb->actual_length is 0 here (a retry has a
+non-NULL buf), so it goes too. Later packets (musb_host_tx) already use sg_miter.addr as it is.
+
+--- a/drivers/usb/musb/musb_host.c
++++ b/drivers/usb/musb/musb_host.c
+@@ -821,8 +821,7 @@
+ 					sg_miter_stop(&qh->sg_miter);
+ 					goto finish;
+ 				}
+-				buf = qh->sg_miter.addr + urb->sg->offset +
+-					urb->actual_length;
++				buf = qh->sg_miter.addr;
+ 				load_count = min_t(u32, load_count,
+ 						qh->sg_miter.length);
+ 				musb_write_fifo(hw_ep, load_count, buf);

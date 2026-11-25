@@ -1,0 +1,29 @@
+diff -ruN a/drivers/watchdog/Kconfig b/drivers/watchdog/Kconfig
+--- a/drivers/watchdog/Kconfig
++++ b/drivers/watchdog/Kconfig
+@@ -886,6 +886,14 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called mtk_wdt.
+ 
++config MT5398_WATCHDOG
++	tristate "MediaTek MT5398 PDWNC watchdog"
++	depends on OF && MFD_SYSCON
++	select WATCHDOG_CORE
++	help
++	  Watchdog 0 of the PDWNC block in the MediaTek MT5398 TV SoC
++	  (LG NetCast), shared with syscon-reboot through a syscon regmap.
++
+ config DIGICOLOR_WATCHDOG
+ 	tristate "Conexant Digicolor SoCs watchdog support"
+ 	depends on ARCH_DIGICOLOR || COMPILE_TEST
+diff -ruN a/drivers/watchdog/Makefile b/drivers/watchdog/Makefile
+--- a/drivers/watchdog/Makefile
++++ b/drivers/watchdog/Makefile
+@@ -79,6 +79,7 @@
+ obj-$(CONFIG_MESON_GXBB_WATCHDOG) += meson_gxbb_wdt.o
+ obj-$(CONFIG_MESON_WATCHDOG) += meson_wdt.o
+ obj-$(CONFIG_MEDIATEK_WATCHDOG) += mtk_wdt.o
++obj-$(CONFIG_MT5398_WATCHDOG) += mt5398_wdt.o
+ obj-$(CONFIG_DIGICOLOR_WATCHDOG) += digicolor_wdt.o
+ obj-$(CONFIG_LPC18XX_WATCHDOG) += lpc18xx_wdt.o
+ obj-$(CONFIG_BCM7038_WDT) += bcm7038_wdt.o

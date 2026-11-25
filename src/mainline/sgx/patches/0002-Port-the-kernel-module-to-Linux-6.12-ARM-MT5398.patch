@@ -1,0 +1,2274 @@
+From e5a64387192ddb92f91f1a021488dc36efad451e Mon Sep 17 00:00:00 2001
+From: Dmitry Dagunts <ddagunts@gmail.com>
+Date: Mon, 23 Nov 2026 23:02:45 -0500
+Subject: [PATCH 2/3] Port the kernel module to Linux 6.12 (ARM, MT5398)
+
+- headers: asm/system.h gone, stddef.h/stdarg.h from linux/
+- mm: __vmalloc() lost its pgprot: uncached/WC areas are pages + vmap()
+  (VM_MAP_PUT_PAGES), flushed first; vmap() takes VM_MAP
+- mmap: vm_flags_set(), vmf_insert_mixed()
+- osfunc: timer_setup(), access_ok() without type, get_user_pages() and
+  follow_pfnmap_start() for user page lookup, mmap_read_lock(), put_page();
+  ARM cache range ops through __cpuc_flush_dcache_area + outer_cache (the
+  dmac_* range functions are private to arch/arm/mm now)
+- module: platform driver bound from the device tree (img,powervr-sgx544),
+  void remove(), class_create(name), no MODULE_SUPPORTED_DEVICE, no
+  suspend/resume
+- proc: /proc/pvr not built (the 3.x procfs API is gone; nothing needs it)
+- devicemem: TI's OMAP GEM unmap path only with SUPPORT_DRI_DRM_EXTERNAL
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../srvkm/bridged/sgx/bridged_sgx_bridge.c    |    2 +-
+ services4/srvkm/common/devicemem.c            |    8 +-
+ services4/srvkm/common/handle.c               |    2 +-
+ services4/srvkm/common/pdump_common.c         |    2 +-
+ services4/srvkm/devices/sgx/pb.c              |    2 +-
+ services4/srvkm/devices/sgx/sgxinit.c         |    2 +-
+ services4/srvkm/devices/sgx/sgxkick.c         |    2 +-
+ services4/srvkm/devices/sgx/sgxpower.c        |    2 +-
+ services4/srvkm/devices/sgx/sgxtransfer.c     |    2 +-
+ services4/srvkm/devices/sgx/sgxutils.c        |    2 +-
+ services4/srvkm/env/linux/event.c             |    2 +-
+ services4/srvkm/env/linux/mm.c                |   48 +-
+ services4/srvkm/env/linux/mmap.c              |   18 +-
+ services4/srvkm/env/linux/module.c            |   29 +-
+ services4/srvkm/env/linux/mutils.h            |   10 +-
+ services4/srvkm/env/linux/osfunc.c            |   99 +-
+ services4/srvkm/env/linux/pdump.c             |    2 +-
+ services4/srvkm/env/linux/proc.c              | 1392 +----------------
+ services4/srvkm/env/linux/proc.h              |    6 +-
+ services4/srvkm/env/linux/pvr_debug.c         |    2 +-
+ services4/srvkm/env/linux/pvr_uaccess.h       |    4 +-
+ services4/srvkm/include/lists.h               |    2 +-
+ services4/srvkm/include/osfunc.h              |    2 +-
+ services4/srvkm/include/pdump_osfunc.h        |    2 +-
+ 24 files changed, 190 insertions(+), 1454 deletions(-)
+
+diff --git a/services4/srvkm/bridged/sgx/bridged_sgx_bridge.c b/services4/srvkm/bridged/sgx/bridged_sgx_bridge.c
+index 6b5b4f0..9402eae 100644
+--- a/services4/srvkm/bridged/sgx/bridged_sgx_bridge.c
++++ b/services4/srvkm/bridged/sgx/bridged_sgx_bridge.c
+@@ -43,7 +43,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+ 
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "img_defs.h"
+ 
+diff --git a/services4/srvkm/common/devicemem.c b/services4/srvkm/common/devicemem.c
+index 0d67c0d..11c8f8f 100644
+--- a/services4/srvkm/common/devicemem.c
++++ b/services4/srvkm/common/devicemem.c
+@@ -40,7 +40,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "services_headers.h"
+ #include "buffer_manager.h"
+@@ -1949,13 +1949,16 @@ IMG_EXPORT
+ PVRSRV_ERROR IMG_CALLCONV PVRSRVUnmapDeviceMemoryKM (PVRSRV_KERNEL_MEM_INFO *psMemInfo,
+ 		PVRSRV_PER_PROCESS_DATA *psPerProc)
+ {
++#if defined(SUPPORT_DRI_DRM_EXTERNAL)
+ 	struct drm_gem_object *buf;
++#endif
+ 
+ 	if (!psMemInfo)
+ 	{
+ 		return PVRSRV_ERROR_INVALID_PARAMS;
+ 	}
+ 
++#if defined(SUPPORT_DRI_DRM_EXTERNAL)
+ 	buf = BM_GetGEM(psMemInfo->sMemBlk.hBuffer);
+ 	if (buf)
+ 	{
+@@ -1978,6 +1981,9 @@ PVRSRV_ERROR IMG_CALLCONV PVRSRVUnmapDeviceMemoryKM (PVRSRV_KERNEL_MEM_INFO *psM
+ 			return PVRSRV_OK;
+ 		/* otherwise fallthru and delete immediately! */
+ 	}
++#else
++	PVR_UNREFERENCED_PARAMETER(psPerProc);
++#endif
+ 
+ 	return ResManFreeResByPtr(psMemInfo->sMemBlk.hResItem, CLEANUP_WITH_POLL);
+ }
+diff --git a/services4/srvkm/common/handle.c b/services4/srvkm/common/handle.c
+index 8a866c2..b97109e 100644
+--- a/services4/srvkm/common/handle.c
++++ b/services4/srvkm/common/handle.c
+@@ -55,7 +55,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+  * pointers to the structures themselves.
+  */
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "services_headers.h"
+ #include "handle.h"
+diff --git a/services4/srvkm/common/pdump_common.c b/services4/srvkm/common/pdump_common.c
+index 2d96dc3..8671e5c 100644
+--- a/services4/srvkm/common/pdump_common.c
++++ b/services4/srvkm/common/pdump_common.c
+@@ -40,7 +40,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+ #if defined(PDUMP)
+-#include <stdarg.h>
++#include <linux/stdarg.h>
+ 
+ #include "services_headers.h"
+ #include "perproc.h"
+diff --git a/services4/srvkm/devices/sgx/pb.c b/services4/srvkm/devices/sgx/pb.c
+index 4ed18bb..c46d7ab 100644
+--- a/services4/srvkm/devices/sgx/pb.c
++++ b/services4/srvkm/devices/sgx/pb.c
+@@ -39,7 +39,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "services_headers.h"
+ #include "sgx_bridge_km.h"
+diff --git a/services4/srvkm/devices/sgx/sgxinit.c b/services4/srvkm/devices/sgx/sgxinit.c
+index 53853ea..99dfc8e 100644
+--- a/services4/srvkm/devices/sgx/sgxinit.c
++++ b/services4/srvkm/devices/sgx/sgxinit.c
+@@ -39,7 +39,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "sgxdefs.h"
+ #include "sgxmmu.h"
+diff --git a/services4/srvkm/devices/sgx/sgxkick.c b/services4/srvkm/devices/sgx/sgxkick.c
+index a40bb9e..816be20 100644
+--- a/services4/srvkm/devices/sgx/sgxkick.c
++++ b/services4/srvkm/devices/sgx/sgxkick.c
+@@ -39,7 +39,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stddef.h> /* For the macro offsetof() */
++#include <linux/stddef.h> /* For the macro offsetof() */
+ #include "services_headers.h"
+ #include "sgxinfo.h"
+ #include "sgxinfokm.h"
+diff --git a/services4/srvkm/devices/sgx/sgxpower.c b/services4/srvkm/devices/sgx/sgxpower.c
+index d58bb77..e0e1d6d 100644
+--- a/services4/srvkm/devices/sgx/sgxpower.c
++++ b/services4/srvkm/devices/sgx/sgxpower.c
+@@ -39,7 +39,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "sgxdefs.h"
+ #include "services_headers.h"
+diff --git a/services4/srvkm/devices/sgx/sgxtransfer.c b/services4/srvkm/devices/sgx/sgxtransfer.c
+index 5106245..c11b560 100644
+--- a/services4/srvkm/devices/sgx/sgxtransfer.c
++++ b/services4/srvkm/devices/sgx/sgxtransfer.c
+@@ -41,7 +41,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+ #if defined(TRANSFER_QUEUE)
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "sgxdefs.h"
+ #include "services_headers.h"
+diff --git a/services4/srvkm/devices/sgx/sgxutils.c b/services4/srvkm/devices/sgx/sgxutils.c
+index bb45433..7c3c96a 100644
+--- a/services4/srvkm/devices/sgx/sgxutils.c
++++ b/services4/srvkm/devices/sgx/sgxutils.c
+@@ -40,7 +40,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stddef.h>
++#include <linux/stddef.h>
+ 
+ #include "sgxdefs.h"
+ #include "services_headers.h"
+diff --git a/services4/srvkm/env/linux/event.c b/services4/srvkm/env/linux/event.c
+index c335640..1ceb8c7 100644
+--- a/services4/srvkm/env/linux/event.c
++++ b/services4/srvkm/env/linux/event.c
+@@ -50,7 +50,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #include <asm/io.h>
+ #include <asm/page.h>
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22))
+-#include <asm/system.h>
++/* asm/system.h: gone since Linux 3.4 */
+ #endif
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+diff --git a/services4/srvkm/env/linux/mm.c b/services4/srvkm/env/linux/mm.c
+index 095529f..4dcc223 100644
+--- a/services4/srvkm/env/linux/mm.c
++++ b/services4/srvkm/env/linux/mm.c
+@@ -63,6 +63,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #endif
+ #include <linux/slab.h>
+ #include <linux/highmem.h>
++#include <asm/cacheflush.h>
++#include <asm/outercache.h>
+ #include <linux/sched.h>
+ 
+ #if defined(PVR_LINUX_MEM_AREA_POOL_ALLOW_SHRINK)
+@@ -483,8 +485,48 @@ _VMallocWrapper(IMG_UINT32 ui32Bytes,
+             return NULL;
+     }
+ 
+-	/* Allocate virtually contiguous pages */
+-    pvRet = __vmalloc(ui32Bytes, GFP_KERNEL | __GFP_HIGHMEM, PGProtFlags);
++	/*
++	 * Allocate virtually contiguous pages. __vmalloc() lost its pgprot argument in
++	 * Linux 5.8, so uncached and write-combined areas are built from pages and vmap()ed;
++	 * VM_MAP_PUT_PAGES makes vfree() release the pages and the array.
++	 */
++    if ((ui32AllocFlags & PVRSRV_HAP_CACHETYPE_MASK) == PVRSRV_HAP_CACHED)
++    {
++        pvRet = vmalloc(ui32Bytes);
++    }
++    else
++    {
++        unsigned int uiPages = PAGE_ALIGN(ui32Bytes) >> PAGE_SHIFT, ui;
++        struct page **ppsPages = kvmalloc_array(uiPages, sizeof(*ppsPages), GFP_KERNEL);
++
++        pvRet = NULL;
++        if (ppsPages)
++        {
++            for (ui = 0; ui < uiPages; ui++)
++            {
++                IMG_VOID *pvPage;
++                phys_addr_t uPhys;
++
++                ppsPages[ui] = alloc_page(GFP_KERNEL | __GFP_HIGHMEM);
++                if (!ppsPages[ui])
++                    break;
++                /* no dirty cache lines may be left behind the uncached alias */
++                pvPage = kmap_local_page(ppsPages[ui]);
++                __cpuc_flush_dcache_area(pvPage, PAGE_SIZE);
++                kunmap_local(pvPage);
++                uPhys = page_to_phys(ppsPages[ui]);
++                outer_flush_range(uPhys, uPhys + PAGE_SIZE);
++            }
++            if (ui == uiPages)
++                pvRet = vmap(ppsPages, uiPages, VM_MAP | VM_MAP_PUT_PAGES, PGProtFlags);
++            if (!pvRet)
++            {
++                while (ui--)
++                    __free_page(ppsPages[ui]);
++                kvfree(ppsPages);
++            }
++        }
++    }
+     
+ #if defined(DEBUG_LINUX_MEMORY_ALLOCATIONS)
+     if (pvRet)
+@@ -533,7 +575,7 @@ _VMapWrapper(struct page **ppsPageList, IMG_UINT32 ui32NumPages, IMG_UINT32 ui32
+             return NULL;
+     }
+ 
+-    pvRet = vmap(ppsPageList, ui32NumPages, GFP_KERNEL | __GFP_HIGHMEM, PGProtFlags);
++    pvRet = vmap(ppsPageList, ui32NumPages, VM_MAP, PGProtFlags);
+ 
+ #if defined(DEBUG_LINUX_MEMORY_ALLOCATIONS)
+     if (pvRet)
+diff --git a/services4/srvkm/env/linux/mmap.c b/services4/srvkm/env/linux/mmap.c
+index a6e0c71..cd78d24 100644
+--- a/services4/srvkm/env/linux/mmap.c
++++ b/services4/srvkm/env/linux/mmap.c
+@@ -61,6 +61,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #include <asm/page.h>
+ #include <asm/shmparam.h>
+ #include <asm/pgtable.h>
++#include <linux/pfn_t.h>
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22))
+ #include <linux/sched.h>
+ #include <asm/current.h>
+@@ -909,7 +910,7 @@ DoMapToUser(LinuxMemArea *psLinuxMemArea,
+ #if defined(PVR_MAKE_ALL_PFNS_SPECIAL)
+ 	if (bMixedMap)
+ 	{
+-            ps_vma->vm_flags |= VM_MIXEDMAP;
++            vm_flags_set(ps_vma, VM_MIXEDMAP);
+ 	}
+ #endif
+ 	/* Second pass, get the page structures and insert the pages */
+@@ -937,7 +938,8 @@ DoMapToUser(LinuxMemArea *psLinuxMemArea,
+ #if defined(PVR_MAKE_ALL_PFNS_SPECIAL)
+ 		    if (bMixedMap)
+ 		    {
+-			result = vm_insert_mixed(ps_vma, ulVMAPos, pfn);
++			/* vm_insert_mixed() became vmf_insert_mixed() (Linux 4.17/5.x) */
++			result = (vmf_insert_mixed(ps_vma, ulVMAPos, pfn_to_pfn_t(pfn)) == VM_FAULT_NOPAGE) ? 0 : -EFAULT;
+ 	                if(result != 0)
+ 	                {
+ 	                    PVR_DPF((PVR_DBG_ERROR,"%s: Error - vm_insert_mixed failed (%d)", __FUNCTION__, result));
+@@ -1214,20 +1216,20 @@ PVRMMap(struct file* pFile, struct vm_area_struct* ps_vma)
+          __FUNCTION__, psOffsetStruct->psLinuxMemArea));
+ 
+ #if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 6, 0))
+-    ps_vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
++    vm_flags_set(ps_vma, VM_DONTEXPAND | VM_DONTDUMP);
+ #else
+-    ps_vma->vm_flags |= VM_RESERVED;
++    vm_flags_set(ps_vma, VM_RESERVED);
+ #endif
+-    ps_vma->vm_flags |= VM_IO;
++    vm_flags_set(ps_vma, VM_IO);
+ 
+     /*
+      * Disable mremap because our nopage handler assumes all
+      * page requests have already been validated.
+      */
+-    ps_vma->vm_flags |= VM_DONTEXPAND;
++    vm_flags_set(ps_vma, VM_DONTEXPAND);
+     
+     /* Don't allow mapping to be inherited across a process fork */
+-    ps_vma->vm_flags |= VM_DONTCOPY;
++    vm_flags_set(ps_vma, VM_DONTCOPY);
+ 
+     ps_vma->vm_private_data = (void *)psOffsetStruct;
+     
+@@ -1368,7 +1370,7 @@ PVRMMapExt(struct file* pFile, struct vm_area_struct* ps_vma)
+ 
+     ui32ByteSize = ps_vma->vm_end - ps_vma->vm_start;
+ 
+-    ps_vma->vm_flags |= VM_DONTCOPY;
++    vm_flags_set(ps_vma, VM_DONTCOPY);
+ 
+ 	psOffsetStruct = FindOffsetStructByOffset(ps_vma->vm_pgoff, ui32ByteSize);
+ 	if (psOffsetStruct == IMG_NULL)
+diff --git a/services4/srvkm/env/linux/module.c b/services4/srvkm/env/linux/module.c
+index e071749..8780191 100644
+--- a/services4/srvkm/env/linux/module.c
++++ b/services4/srvkm/env/linux/module.c
+@@ -86,6 +86,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
++#include <linux/mod_devicetable.h>
+ #include <linux/fs.h>
+ #include <linux/proc_fs.h>
+ 
+@@ -149,7 +150,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #define	DRVNAME		PVR_LDM_DRIVER_REGISTRATION_NAME
+ #endif
+ #define DEVNAME		PVRSRV_MODNAME
+-MODULE_SUPPORTED_DEVICE(DEVNAME);
+ #endif
+ 
+ /*
+@@ -233,8 +233,9 @@ static IMG_UINT32 gPVRPowerLevel;
+  * This is the driver interface we support.  
+  */
+ #if defined(PVR_LDM_PLATFORM_MODULE) && !defined(SUPPORT_DRI_DRM_EXTERNAL)
+-static int PVRSRVDriverRemove(LDM_DEV *device);
++static void PVRSRVDriverRemove(LDM_DEV *device);
+ static int PVRSRVDriverProbe(LDM_DEV *device);
++static void PVRSRVDriverShutdown(LDM_DEV *device);
+ #endif
+ #if defined(PVR_LDM_PCI_MODULE)
+ static void PVRSRVDriverRemove(LDM_DEV *device);
+@@ -261,11 +262,22 @@ static struct platform_device_id powervr_id_table[] = {
+ };
+ #endif
+ 
++#if defined(PVR_LDM_PLATFORM_MODULE)
++
++/* The SGX comes from the device tree on the mainline kernel */
++static const struct of_device_id powervr_of_match[] = {
++	{ .compatible = "img,powervr-sgx544" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, powervr_of_match);
++#endif
++
+ #if defined(SUPPORT_DRI_DRM_EXTERNAL) || !defined(SUPPORT_DRI_DRM)
+ static LDM_DRV powervr_driver = {
+ #if defined(PVR_LDM_PLATFORM_MODULE)
+ 	.driver = {
+ 		.name		= DRVNAME,
++		.of_match_table	= powervr_of_match,
+ 	},
+ #endif
+ #if defined(PVR_LDM_PCI_MODULE)
+@@ -281,8 +293,7 @@ static LDM_DRV powervr_driver = {
+ #if defined(PVR_LDM_PCI_MODULE)
+ 	.remove		= __devexit_p(PVRSRVDriverRemove),
+ #endif
+-	.suspend	= PVRSRVDriverSuspend,
+-	.resume		= PVRSRVDriverResume,
++	/* no suspend/resume: the TV never suspends this kernel */
+ 	.shutdown	= PVRSRVDriverShutdown,
+ };
+ #endif
+@@ -399,7 +410,7 @@ static int __devinit PVRSRVDriverProbe(LDM_DEV *pDevice, const struct pci_device
+ 
+ *****************************************************************************/
+ #if defined (PVR_LDM_PLATFORM_MODULE)
+-PVR_MOD_STATIC int PVRSRVDriverRemove(LDM_DEV *pDevice)
++PVR_MOD_STATIC void PVRSRVDriverRemove(LDM_DEV *pDevice)
+ #endif
+ #if defined(PVR_LDM_PCI_MODULE)
+ static void __devexit PVRSRVDriverRemove(LDM_DEV *pDevice)
+@@ -437,12 +448,6 @@ static void __devexit PVRSRVDriverRemove(LDM_DEV *pDevice)
+ 	}
+ #endif
+ 
+-#if defined (PVR_LDM_PLATFORM_MODULE)
+-	return 0;
+-#endif
+-#if defined (PVR_LDM_PCI_MODULE)
+-	return;
+-#endif
+ }
+ #endif /* defined(PVR_LDM_MODULE) */
+ 
+@@ -1028,7 +1033,7 @@ static int __init PVRCore_Init(void)
+ 	 * This code (using GPL symbols) facilitates automatic device
+ 	 * node creation on platforms with udev (or similar).
+ 	 */
+-	psPvrClass = class_create(THIS_MODULE, "pvr");
++	psPvrClass = class_create("pvr");
+ 
+ 	if (IS_ERR(psPvrClass))
+ 	{
+diff --git a/services4/srvkm/env/linux/mutils.h b/services4/srvkm/env/linux/mutils.h
+index 891598c..c7f756a 100644
+--- a/services4/srvkm/env/linux/mutils.h
++++ b/services4/srvkm/env/linux/mutils.h
+@@ -79,7 +79,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 	#define	IOREMAP(pa, bytes)	ioremap_cache(pa, bytes)
+ #else	
+ 	#if defined(__arm__) && (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0))
+-		#define	IOREMAP(pa, bytes)	ioremap_cached(pa, bytes)
++		#define	IOREMAP(pa, bytes)	ioremap_cache(pa, bytes)
+ 	#else
+ 		#define IOREMAP(pa, bytes)	ioremap(pa, bytes)
+ 	#endif
+@@ -89,7 +89,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 	#if defined(SUPPORT_LINUX_X86_WRITECOMBINE)
+ 		#define IOREMAP_WC(pa, bytes) ioremap_wc(pa, bytes)
+ 	#else
+-		#define IOREMAP_WC(pa, bytes) ioremap_nocache(pa, bytes)
++		#define IOREMAP_WC(pa, bytes) ioremap(pa, bytes)
+ 	#endif
+ #else
+ 	#if defined(__arm__)
+@@ -97,7 +97,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 			#define IOREMAP_WC(pa, bytes) ioremap_wc(pa, bytes)
+ 		#else
+ 			#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22))
+-				#define	IOREMAP_WC(pa, bytes)	ioremap_nocache(pa, bytes)
++				#define	IOREMAP_WC(pa, bytes)	ioremap(pa, bytes)
+ 			#else
+ 				#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,17))
+ 					#define	IOREMAP_WC(pa, bytes)	__ioremap(pa, bytes, L_PTE_BUFFERABLE)
+@@ -107,11 +107,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 			#endif
+ 		#endif
+ 	#else
+-		#define IOREMAP_WC(pa, bytes)	ioremap_nocache(pa, bytes)
++		#define IOREMAP_WC(pa, bytes)	ioremap(pa, bytes)
+ 	#endif
+ #endif
+ 
+-#define	IOREMAP_UC(pa, bytes)	ioremap_nocache(pa, bytes)
++#define	IOREMAP_UC(pa, bytes)	ioremap(pa, bytes)
+ 
+ IMG_VOID PVRLinuxMUtilsInit(IMG_VOID);
+ 
+diff --git a/services4/srvkm/env/linux/osfunc.c b/services4/srvkm/env/linux/osfunc.c
+index f2e0792..656bb56 100644
+--- a/services4/srvkm/env/linux/osfunc.c
++++ b/services4/srvkm/env/linux/osfunc.c
+@@ -50,7 +50,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #include <asm/io.h>
+ #include <asm/page.h>
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22))
+-#include <asm/system.h>
++/* asm/system.h: gone since Linux 3.4 */
+ #endif
+ #include <asm/cacheflush.h>
+ #include <linux/mm.h>
+@@ -2704,9 +2704,9 @@ static void OSTimerCallbackBody(TIMER_CALLBACK_DATA *psTimerCBData)
+  @Return   NONE
+ 
+ ******************************************************************************/
+-static IMG_VOID OSTimerCallbackWrapper(IMG_UINT32 ui32Data)
++static IMG_VOID OSTimerCallbackWrapper(struct timer_list *psTimer)
+ {
+-    TIMER_CALLBACK_DATA	*psTimerCBData = (TIMER_CALLBACK_DATA*)ui32Data;
++    TIMER_CALLBACK_DATA	*psTimerCBData = from_timer(psTimerCBData, psTimer, sTimer);
+     
+ #if defined(PVR_LINUX_TIMERS_USING_WORKQUEUES) || defined(PVR_LINUX_TIMERS_USING_SHARED_WORKQUEUE)
+     int res;
+@@ -2807,12 +2807,8 @@ IMG_HANDLE OSAddTimer(PFN_TIMER_FUNC pfnTimerFunc, IMG_VOID *pvData, IMG_UINT32
+                                 ?	1
+                                 :	((HZ * ui32MsTimeout) / 1000);
+     /* initialise object */
+-    init_timer(&psTimerCBData->sTimer);
+-    
+-    /* setup timer object */
+-    /* PRQA S 0307,0563 1 */ /* ignore warning about inconpartible ptr casting */
+-    psTimerCBData->sTimer.function = (IMG_VOID *)OSTimerCallbackWrapper;
+-    psTimerCBData->sTimer.data = (IMG_UINT32)psTimerCBData;
++    /* timer_setup() replaced init_timer() and timer_list.data in Linux 4.15 */
++    timer_setup(&psTimerCBData->sTimer, OSTimerCallbackWrapper, 0);
+     
+     return (IMG_HANDLE)(ui32i + 1);
+ }
+@@ -3294,19 +3290,9 @@ PVRSRV_ERROR OSCopyFromUser( IMG_PVOID pvProcess,
+ ******************************************************************************/
+ IMG_BOOL OSAccessOK(IMG_VERIFY_TEST eVerification, IMG_VOID *pvUserPtr, IMG_UINT32 ui32Bytes)
+ {
+-    IMG_INT linuxType;
+-
+-    if (eVerification == PVR_VERIFY_READ)
+-    {
+-        linuxType = VERIFY_READ;
+-    }
+-    else
+-    {
+-        PVR_ASSERT(eVerification == PVR_VERIFY_WRITE);
+-        linuxType = VERIFY_WRITE;
+-    }
+-
+-    return access_ok(linuxType, pvUserPtr, ui32Bytes);
++    /* access_ok() lost its type argument in Linux 5.0 */
++    PVR_UNREFERENCED_PARAMETER(eVerification);
++    return access_ok(pvUserPtr, ui32Bytes);
+ }
+ 
+ typedef enum _eWrapMemType_
+@@ -3356,36 +3342,20 @@ typedef struct _sWrapMemInfo_
+ ******************************************************************************/
+ static IMG_BOOL CPUVAddrToPFN(struct vm_area_struct *psVMArea, IMG_UINT32 ulCPUVAddr, IMG_UINT32 *pulPFN, struct page **ppsPage)
+ {
+-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,10))
+-    pgd_t *psPGD;
+-    pud_t *psPUD;
+-    pmd_t *psPMD;
+-    pte_t *psPTE;
+-    struct mm_struct *psMM = psVMArea->vm_mm;
+-    spinlock_t *psPTLock;
++    /* follow_pfnmap_start() replaced the open-coded page table walk (Linux 6.12) */
++    struct follow_pfnmap_args sArgs = { .vma = psVMArea, .address = ulCPUVAddr };
+     IMG_BOOL bRet = IMG_FALSE;
+ 
+     *pulPFN = 0;
+     *ppsPage = NULL;
+ 
+-    psPGD = pgd_offset(psMM, ulCPUVAddr);
+-    if (pgd_none(*psPGD) || pgd_bad(*psPGD))
+-        return bRet;
+-
+-    psPUD = pud_offset(psPGD, ulCPUVAddr);
+-    if (pud_none(*psPUD) || pud_bad(*psPUD))
+-        return bRet;
+-
+-    psPMD = pmd_offset(psPUD, ulCPUVAddr);
+-    if (pmd_none(*psPMD) || pmd_bad(*psPMD))
++    if (follow_pfnmap_start(&sArgs))
+         return bRet;
+ 
+-    psPTE = (pte_t *)pte_offset_map_lock(psMM, psPMD, ulCPUVAddr, &psPTLock);
+-
+-    if ((pte_none(*psPTE) == 0) && (pte_present(*psPTE) != 0) && (pte_write(*psPTE) != 0))
++    if (sArgs.writable)
+     {
+-        *pulPFN = pte_pfn(*psPTE);
+-	bRet = IMG_TRUE;
++        *pulPFN = sArgs.pfn;
++        bRet = IMG_TRUE;
+ 
+         if (pfn_valid(*pulPFN))
+         {
+@@ -3395,12 +3365,9 @@ static IMG_BOOL CPUVAddrToPFN(struct vm_area_struct *psVMArea, IMG_UINT32 ulCPUV
+         }
+     }
+ 
+-    pte_unmap_unlock(psPTE, psPTLock);
++    follow_pfnmap_end(&sArgs);
+ 
+     return bRet;
+-#else
+-    return IMG_FALSE;
+-#endif
+ }
+ 
+ /*!
+@@ -3458,7 +3425,7 @@ PVRSRV_ERROR OSReleasePhysPageAddr(IMG_HANDLE hOSWrapMem)
+                         SetPageDirty(psPage);
+                     }
+ 	        }
+-                page_cache_release(psPage);
++                put_page(psPage);
+ 	    }
+             break;
+         }
+@@ -3631,11 +3598,11 @@ PVRSRV_ERROR OSAcquirePhysPageAddr(IMG_VOID *pvCPUVAddr,
+     psInfo->eType = WRAP_TYPE_GET_USER_PAGES;
+ 
+     /* Lock down user memory */
+-    down_read(&current->mm->mmap_sem);
++    mmap_read_lock(current->mm);
+     bMMapSemHeld = IMG_TRUE;
+ 
+     /* Get page list */
+-    psInfo->iNumPagesMapped = get_user_pages(current, current->mm, ulStartAddr, psInfo->iNumPages, 1, 0, psInfo->ppsPages, NULL);
++    psInfo->iNumPagesMapped = get_user_pages(ulStartAddr, psInfo->iNumPages, FOLL_WRITE, psInfo->ppsPages);
+ 
+     if (psInfo->iNumPagesMapped >= 0)
+     {
+@@ -3822,7 +3789,7 @@ PVRSRV_ERROR OSAcquirePhysPageAddr(IMG_VOID *pvCPUVAddr,
+ 
+ exit:
+     PVR_ASSERT(bMMapSemHeld);
+-    up_read(&current->mm->mmap_sem);
++    mmap_read_unlock(current->mm);
+ 
+     /* Return the cookie */
+     *phOSWrapMem = (IMG_HANDLE)psInfo;
+@@ -3840,7 +3807,7 @@ exit:
+ error:
+     if (bMMapSemHeld)
+     {
+-        up_read(&current->mm->mmap_sem);
++        mmap_read_unlock(current->mm);
+     }
+     OSReleasePhysPageAddr((IMG_HANDLE)psInfo);
+ 
+@@ -4348,23 +4315,19 @@ static inline size_t pvr_dmac_range_len(const void *pvStart, const void *pvEnd)
+ }
+ #endif
+ 
+-static void pvr_dmac_inv_range(const void *pvStart, const void *pvEnd)
++/*
++ * Since Linux 4.x the ARM dmac_* range operations are private to arch/arm/mm. Modules get
++ * __cpuc_flush_dcache_area (clean + invalidate by VA), so clean and invalidate both use it:
++ * a clean that also invalidates is harmless, and the DDK cleans CPU-written buffers before
++ * the GPU uses them, so an invalidate that also cleans finds no dirty lines to write back.
++ */
++static void pvr_dmac_flush_range(const void *pvStart, const void *pvEnd)
+ {
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34))
+-	dmac_inv_range(pvStart, pvEnd);
+-#else
+-	dmac_map_area(pvStart, pvr_dmac_range_len(pvStart, pvEnd), DMA_FROM_DEVICE);
+-#endif
++	__cpuc_flush_dcache_area((void *)pvStart, pvr_dmac_range_len(pvStart, pvEnd));
+ }
+ 
+-static void pvr_dmac_clean_range(const void *pvStart, const void *pvEnd)
+-{
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34))
+-	dmac_clean_range(pvStart, pvEnd);
+-#else
+-	dmac_map_area(pvStart, pvr_dmac_range_len(pvStart, pvEnd), DMA_TO_DEVICE);
+-#endif
+-}
++#define pvr_dmac_inv_range	pvr_dmac_flush_range
++#define pvr_dmac_clean_range	pvr_dmac_flush_range
+ 
+ IMG_BOOL OSFlushCPUCacheRangeKM(IMG_HANDLE hOSMemHandle,
+ 								IMG_UINT32 ui32ByteOffset,
+@@ -4373,7 +4336,7 @@ IMG_BOOL OSFlushCPUCacheRangeKM(IMG_HANDLE hOSMemHandle,
+ {
+ 	return CheckExecuteCacheOp(hOSMemHandle, ui32ByteOffset,
+ 							   pvRangeAddrStart, ui32Length,
+-							   dmac_flush_range, outer_flush_range);
++							   pvr_dmac_flush_range, outer_flush_range);
+ }
+ 
+ IMG_BOOL OSCleanCPUCacheRangeKM(IMG_HANDLE hOSMemHandle,
+diff --git a/services4/srvkm/env/linux/pdump.c b/services4/srvkm/env/linux/pdump.c
+index 0124737..9970058 100644
+--- a/services4/srvkm/env/linux/pdump.c
++++ b/services4/srvkm/env/linux/pdump.c
+@@ -43,7 +43,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #if defined (PDUMP)
+ 
+ #include <asm/atomic.h>
+-#include <stdarg.h>
++#include <linux/stdarg.h>
+ #if defined (SUPPORT_SGX)
+ #include "sgxdefs.h" /* Is this still needed? */
+ #endif
+diff --git a/services4/srvkm/env/linux/proc.c b/services4/srvkm/env/linux/proc.c
+index 3824539..d79454e 100644
+--- a/services4/srvkm/env/linux/proc.c
++++ b/services4/srvkm/env/linux/proc.c
+@@ -1,1402 +1,116 @@
+-/*************************************************************************/ /*!
+-@Title          Proc files implementation.
+-@Copyright      Copyright (c) Imagination Technologies Ltd. All Rights Reserved
+-@Description    Functions for creating and reading proc filesystem entries.
+-                Proc filesystem support must be built into the kernel for
+-                these functions to be any use.
+-@License        Dual MIT/GPLv2
+-
+-The contents of this file are subject to the MIT license as set out below.
+-
+-Permission is hereby granted, free of charge, to any person obtaining a copy
+-of this software and associated documentation files (the "Software"), to deal
+-in the Software without restriction, including without limitation the rights
+-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-copies of the Software, and to permit persons to whom the Software is
+-furnished to do so, subject to the following conditions:
+-
+-The above copyright notice and this permission notice shall be included in
+-all copies or substantial portions of the Software.
+-
+-Alternatively, the contents of this file may be used under the terms of
+-the GNU General Public License Version 2 ("GPL") in which case the provisions
+-of GPL are applicable instead of those above.
+-
+-If you wish to allow use of your version of this file only under the terms of
+-GPL, and not to allow others to use your version of this file under the terms
+-of the MIT license, indicate your decision by deleting the provisions above
+-and replace them with the notice and other provisions required by GPL as set
+-out in the file called "GPL-COPYING" included in this distribution. If you do
+-not delete the provisions above, a recipient may use your version of this file
+-under the terms of either the MIT license or GPL.
+-
+-This License is also included in this distribution in the file called
+-"MIT-COPYING".
+-
+-EXCEPT AS OTHERWISE STATED IN A NEGOTIATED AGREEMENT: (A) THE SOFTWARE IS
+-PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+-BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+-PURPOSE AND NONINFRINGEMENT; AND (B) IN NO EVENT SHALL THE AUTHORS OR
+-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+-*/ /**************************************************************************/
+-
++/*************************************************************************/
++
++/*
++ * MT5398 port: /proc/pvr is not built. The old interfaces (create_proc_read_entry,
++ * read_proc_t, proc_dir_entry internals) are gone from Linux, and neither the TV's
++ * userspace nor the driver needs the files. Every entry point succeeds and creates
++ * nothing; the version string still goes to the kernel log from SysFinalise.
++ */
+ #include <linux/version.h>
+-
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,38))
+-#ifndef AUTOCONF_INCLUDED
+-#include <linux/config.h>
+-#endif
+-#endif
+-
+-#include <linux/init.h>
+-#include <linux/module.h>
+-#include <linux/fs.h>
+ #include <linux/proc_fs.h>
+ #include <linux/seq_file.h>
++#include <linux/kernel.h>
+ 
+ #include "services_headers.h"
+-
+-#include "queue.h"
+-#include "resman.h"
+-#include "pvrmmap.h"
+-#include "pvr_debug.h"
+-#include "pvrversion.h"
+ #include "proc.h"
+-#include "perproc.h"
+ #include "env_perproc.h"
+-#include "linkage.h"
+-
+-#include "lists.h"
+-
+-// The proc entry for our /proc/pvr directory
+-static struct proc_dir_entry * dir;
+-
+-static const IMG_CHAR PVRProcDirRoot[] = "pvr";
+-
+-static IMG_INT pvr_proc_open(struct inode *inode,struct file *file);
+-static void *pvr_proc_seq_start (struct seq_file *m, loff_t *pos);
+-static void pvr_proc_seq_stop (struct seq_file *m, void *v);
+-static void *pvr_proc_seq_next (struct seq_file *m, void *v, loff_t *pos);
+-static int pvr_proc_seq_show (struct seq_file *m, void *v);
+-static ssize_t pvr_proc_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos);
+-
+-static struct file_operations pvr_proc_operations =
+-{
+-	.open		= pvr_proc_open,
+-	.read		= seq_read,
+-	.write		= pvr_proc_write,
+-	.llseek		= seq_lseek,
+-	.release	= seq_release,
+-};
+-
+-static struct seq_operations pvr_proc_seq_operations =
+-{
+-	.start =	pvr_proc_seq_start,
+-	.next =		pvr_proc_seq_next,
+-	.stop =		pvr_proc_seq_stop,
+-	.show =		pvr_proc_seq_show,
+-};
+-
+-static struct proc_dir_entry* g_pProcQueue;
+-static struct proc_dir_entry* g_pProcVersion;
+-static struct proc_dir_entry* g_pProcSysNodes;
+-
+-#ifdef DEBUG
+-static struct proc_dir_entry* g_pProcDebugLevel;
+-#endif
+-
+-#ifdef PVR_MANUAL_POWER_CONTROL
+-static struct proc_dir_entry* g_pProcPowerLevel;
+-#endif
+-
+-
+-static void ProcSeqShowVersion(struct seq_file *sfile,void* el);
+-
+-static void ProcSeqShowSysNodes(struct seq_file *sfile,void* el);
+-static void* ProcSeqOff2ElementSysNodes(struct seq_file * sfile, loff_t off);
+-
+-/*!
+-******************************************************************************
+ 
+- @Function : printAppend
+-
+- @Description
+-
+- Print into the supplied buffer at the specified offset remaining within
+- the specified total buffer size.
+-
+- @Input  size : the total size of the buffer
+-
+- @Input  off : the offset into the buffer to start printing
+-
+- @Input  format : the printf format string
+-
+- @Input  ...    : format args
+-
+- @Return : The number of chars now in the buffer (original value of 'off'
+-           plus number of chars added); 'size' if full.
+-
+-*****************************************************************************/
+-off_t printAppend(IMG_CHAR * buffer, size_t size, off_t off, const IMG_CHAR * format, ...)
++off_t printAppend(IMG_CHAR *buffer, size_t size, off_t off, const IMG_CHAR *format, ...)
+ {
+-    IMG_INT n;
+-    size_t space = size - (size_t)off;
+-    va_list ap;
+-
+-    va_start (ap, format);
+-
+-    n = vsnprintf (buffer+off, space, format, ap);
++	IMG_INT n;
++	size_t space = size - (size_t)off;
++	va_list ap;
+ 
+-    va_end (ap);
+-    /* According to POSIX, n is greater than or equal to the size available if
+-     * the print would have overflowed the buffer.  Other platforms may
+-     * return -1 if printing was truncated.
+-     */
+-    if (n >= (IMG_INT)space || n < 0)
+-    {
+-	/* Ensure final string is terminated */
+-        buffer[size - 1] = 0;
+-        return (off_t)(size - 1);
+-    }
+-    else
+-    {
+-        return (off + (off_t)n);
+-    }
++	va_start(ap, format);
++	n = vsnprintf(buffer + off, space, format, ap);
++	va_end(ap);
++	if (n >= (IMG_INT)space || n < 0) {
++		buffer[size - 1] = 0;
++		return (off_t)(size - 1);
++	}
++	return off + n;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : ProcSeq1ElementOff2Element
+-
+- @Description
+-
+- Heleper Offset -> Element function for /proc files with only one entry
+- without header.
+-
+- @Input  sfile : seq_file object related to /proc/ file
+-
+- @Input  off : the offset into the buffer (id of object)
+-
+- @Return : Pointer to element to be shown.
+-
+-*****************************************************************************/
+-void* ProcSeq1ElementOff2Element(struct seq_file *sfile, loff_t off)
++void *ProcSeq1ElementOff2Element(struct seq_file *sfile, loff_t off)
+ {
+ 	PVR_UNREFERENCED_PARAMETER(sfile);
+-	// Return anything that is not PVR_RPOC_SEQ_START_TOKEN and NULL
+-	if(!off)
+-		return (void*)2;
+-	return NULL;
++	return off == 0 ? (void *)2 : NULL;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : ProcSeq1ElementHeaderOff2Element
+-
+- @Description
+-
+- Heleper Offset -> Element function for /proc files with only one entry
+- with header.
+-
+- @Input  sfile : seq_file object related to /proc/ file
+-
+- @Input  off : the offset into the buffer (id of object)
+-
+- @Return : Pointer to element to be shown.
+-
+-*****************************************************************************/
+-void* ProcSeq1ElementHeaderOff2Element(struct seq_file *sfile, loff_t off)
++void *ProcSeq1ElementHeaderOff2Element(struct seq_file *sfile, loff_t off)
+ {
+ 	PVR_UNREFERENCED_PARAMETER(sfile);
+-
+-	if(!off)
+-	{
++	if (off == 0)
+ 		return PVR_PROC_SEQ_START_TOKEN;
+-	}
+-
+-	// Return anything that is not PVR_RPOC_SEQ_START_TOKEN and NULL
+-	if(off == 1)
+-		return (void*)2;
+-
+-	return NULL;
+-}
+-
+-
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_proc_open
+-
+- @Description
+- File opening function passed to proc_dir_entry->proc_fops for /proc entries
+- created by CreateProcReadEntrySeq.
+-
+- @Input  inode : inode entry of opened /proc file
+-
+- @Input  file : file entry of opened /proc file
+-
+- @Return      : 0 if no errors
+-
+-*****************************************************************************/
+-static IMG_INT pvr_proc_open(struct inode *inode,struct file *file)
+-{
+-	IMG_INT ret = seq_open(file, &pvr_proc_seq_operations);
+-
+-	struct seq_file *seq = (struct seq_file*)file->private_data;
+-	struct proc_dir_entry* pvr_proc_entry = PDE(inode);
+-
+-	/* Add pointer to handlers to seq_file structure */
+-	seq->private = pvr_proc_entry->data;
+-	return ret;
+-}
+-
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_proc_write
+-
+- @Description
+- File writing function passed to proc_dir_entry->proc_fops for /proc files.
+- It's exacly the same function that is used as default one (->fs/proc/generic.c),
+- it calls proc_dir_entry->write_proc for writing procedure.
+-
+-*****************************************************************************/
+-static ssize_t pvr_proc_write(struct file *file, const char __user *buffer,
+-		size_t count, loff_t *ppos)
+-{
+-	struct inode *inode = file->f_path.dentry->d_inode;
+-	struct proc_dir_entry * dp;
+-
+-	PVR_UNREFERENCED_PARAMETER(ppos);
+-	dp = PDE(inode);
+-
+-	if (!dp->write_proc)
+-		return -EIO;
+-
+-	return dp->write_proc(file, buffer, count, dp->data);
+-}
+-
+-
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_proc_seq_start
+-
+- @Description
+- Seq_file start function. Detailed description of seq_file workflow can
+- be found here: http://tldp.org/LDP/lkmpg/2.6/html/x861.html.
+- This function ises off2element handler.
+-
+- @Input  proc_seq_file : sequence file entry
+-
+- @Input  pos : offset within file (id of entry)
+-
+- @Return      : Pointer to element from we start enumeration (0 ends it)
+-
+-*****************************************************************************/
+-static void *pvr_proc_seq_start (struct seq_file *proc_seq_file, loff_t *pos)
+-{
+-	PVR_PROC_SEQ_HANDLERS *handlers = (PVR_PROC_SEQ_HANDLERS*)proc_seq_file->private;
+-	if(handlers->startstop != NULL)
+-		handlers->startstop(proc_seq_file, IMG_TRUE);
+-	return handlers->off2element(proc_seq_file, *pos);
+-}
+-
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_proc_seq_stop
+-
+- @Description
+- Seq_file stop function. Detailed description of seq_file workflow can
+- be found here: http://tldp.org/LDP/lkmpg/2.6/html/x861.html.
+-
+- @Input  proc_seq_file : sequence file entry
+-
+- @Input  v : current element pointer
+-
+-*****************************************************************************/
+-static void pvr_proc_seq_stop (struct seq_file *proc_seq_file, void *v)
+-{
+-	PVR_PROC_SEQ_HANDLERS *handlers = (PVR_PROC_SEQ_HANDLERS*)proc_seq_file->private;
+-	PVR_UNREFERENCED_PARAMETER(v);
+-
+-	if(handlers->startstop != NULL)
+-		handlers->startstop(proc_seq_file, IMG_FALSE);
+-}
+-
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_proc_seq_next
+-
+- @Description
+- Seq_file next element function. Detailed description of seq_file workflow can
+- be found here: http://tldp.org/LDP/lkmpg/2.6/html/x861.html.
+- It uses supplied 'next' handler for fetching next element (or 0 if there is no one)
+-
+- @Input  proc_seq_file : sequence file entry
+-
+- @Input  pos : offset within file (id of entry)
+-
+- @Input  v : current element pointer
+-
+- @Return   : next element pointer (or 0 if end)
+-
+-*****************************************************************************/
+-static void *pvr_proc_seq_next (struct seq_file *proc_seq_file, void *v, loff_t *pos)
+-{
+-	PVR_PROC_SEQ_HANDLERS *handlers = (PVR_PROC_SEQ_HANDLERS*)proc_seq_file->private;
+-	(*pos)++;
+-	if( handlers->next != NULL)
+-		return handlers->next( proc_seq_file, v, *pos );
+-	return handlers->off2element(proc_seq_file, *pos);
+-}
+-
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_proc_seq_show
+-
+- @Description
+- Seq_file show element function. Detailed description of seq_file workflow can
+- be found here: http://tldp.org/LDP/lkmpg/2.6/html/x861.html.
+- It call proper 'show' handler to show (dump) current element using seq_* functions
+-
+- @Input  proc_seq_file : sequence file entry
+-
+- @Input  v : current element pointer
+-
+- @Return   : 0 if everything is OK
+-
+-*****************************************************************************/
+-static int pvr_proc_seq_show (struct seq_file *proc_seq_file, void *v)
+-{
+-	PVR_PROC_SEQ_HANDLERS *handlers = (PVR_PROC_SEQ_HANDLERS*)proc_seq_file->private;
+-	handlers->show( proc_seq_file,v );
+-    return 0;
+-}
+-
+-
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreateProcEntryInDirSeq
+-
+- @Description
+-
+- Create a file under the given directory.  These dynamic files can be used at
+- runtime to get or set information about the device. Whis version uses seq_file
+- interface
+-
+- @Input  pdir : parent directory
+-
+- @Input name : the name of the file to create
+-
+- @Input data : aditional data that will be passed to handlers
+-
+- @Input next_handler : the function to call to provide the next element. OPTIONAL, if not
+-						supplied, then off2element function is used instead
+-
+- @Input show_handler : the function to call to show element
+-
+- @Input off2element_handler : the function to call when it is needed to translate offest to element
+-
+- @Input startstop_handler : the function to call when output memory page starts or stops. OPTIONAL.
+-
+- @Input  whandler : the function to interpret writes from the user
+-
+- @Return Ptr to proc entry , 0 for failure
+-
+-
+-*****************************************************************************/
+-static struct proc_dir_entry* CreateProcEntryInDirSeq(
+-									   struct proc_dir_entry *pdir,
+-									   const IMG_CHAR * name,
+-    								   IMG_VOID* data,
+-									   pvr_next_proc_seq_t next_handler,
+-									   pvr_show_proc_seq_t show_handler,
+-									   pvr_off2element_proc_seq_t off2element_handler,
+-									   pvr_startstop_proc_seq_t startstop_handler,
+-									   write_proc_t whandler
+-									   )
+-{
+-
+-    struct proc_dir_entry * file;
+-	mode_t mode;
+-
+-    if (!dir)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcEntryInDirSeq: cannot make proc entry /proc/%s/%s: no parent", PVRProcDirRoot, name));
+-        return NULL;
+-    }
+-
+-	mode = S_IFREG;
+-
+-    if (show_handler)
+-    {
+-		mode |= S_IRUGO;
+-    }
+-
+-    if (whandler)
+-    {
+-		mode |= S_IWUSR;
+-    }
+-
+-	file=create_proc_entry(name, mode, pdir);
+-
+-    if (file)
+-    {
+-		PVR_PROC_SEQ_HANDLERS *seq_handlers;
+-
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30))
+-        file->owner = THIS_MODULE;
+-#endif
+-
+-		file->proc_fops = &pvr_proc_operations;
+-		file->write_proc = whandler;
+-
+-		/* Pass the handlers */
+-		file->data =  kmalloc(sizeof(PVR_PROC_SEQ_HANDLERS), GFP_KERNEL);
+-		if(file->data)
+-		{
+-			seq_handlers = (PVR_PROC_SEQ_HANDLERS*)file->data;
+-			seq_handlers->next = next_handler;
+-			seq_handlers->show = show_handler;
+-			seq_handlers->off2element = off2element_handler;
+-			seq_handlers->startstop = startstop_handler;
+-			seq_handlers->data = data;
+-
+-        	return file;
+-		}
+-    }
+-
+-    PVR_DPF((PVR_DBG_ERROR, "CreateProcEntryInDirSeq: cannot make proc entry /proc/%s/%s: no memory", PVRProcDirRoot, name));
+-    return NULL;
+-}
+-
+-
+-/*!
+-******************************************************************************
+-
+- @Function :  CreateProcReadEntrySeq
+-
+- @Description
+-
+- Create a file under /proc/pvr.  These dynamic files can be used at runtime
+- to get information about the device.  Creation WILL fail if proc support is
+- not compiled into the kernel.  That said, the Linux kernel is not even happy
+- to build without /proc support these days. This version uses seq_file structure
+- for handling content generation.
+-
+- @Input name : the name of the file to create
+-
+- @Input data : aditional data that will be passed to handlers
+-
+- @Input next_handler : the function to call to provide the next element. OPTIONAL, if not
+-						supplied, then off2element function is used instead
+-
+- @Input show_handler : the function to call to show element
+-
+- @Input off2element_handler : the function to call when it is needed to translate offest to element
+-
+- @Input startstop_handler : the function to call when output memory page starts or stops. OPTIONAL.
+-
+- @Return Ptr to proc entry , 0 for failure
+-
+-*****************************************************************************/
+-struct proc_dir_entry* CreateProcReadEntrySeq (
+-								const IMG_CHAR * name,
+-								IMG_VOID* data,
+-								pvr_next_proc_seq_t next_handler,
+-								pvr_show_proc_seq_t show_handler,
+-								pvr_off2element_proc_seq_t off2element_handler,
+-								pvr_startstop_proc_seq_t startstop_handler
+-							   )
+-{
+-	return CreateProcEntrySeq(name,
+-							  data,
+-							  next_handler,
+-							  show_handler,
+-							  off2element_handler,
+-							  startstop_handler,
+-							  NULL);
+-}
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreateProcEntrySeq
+-
+- @Description
+-
+- @Description
+-
+- Create a file under /proc/pvr.  These dynamic files can be used at runtime
+- to get information about the device.  Creation WILL fail if proc support is
+- not compiled into the kernel.  That said, the Linux kernel is not even happy
+- to build without /proc support these days. This version uses seq_file structure
+- for handling content generation and is fuller than CreateProcReadEntrySeq (it
+- supports write access);
+-
+- @Input name : the name of the file to create
+-
+- @Input data : aditional data that will be passed to handlers
+-
+- @Input next_handler : the function to call to provide the next element. OPTIONAL, if not
+-						supplied, then off2element function is used instead
+-
+- @Input show_handler : the function to call to show element
+-
+- @Input off2element_handler : the function to call when it is needed to translate offest to element
+-
+- @Input startstop_handler : the function to call when output memory page starts or stops. OPTIONAL.
+-
+- @Input  whandler : the function to interpret writes from the user
+-
+- @Return Ptr to proc entry , 0 for failure
+-
+-*****************************************************************************/
+-struct proc_dir_entry* CreateProcEntrySeq (
+-											const IMG_CHAR * name,
+-											IMG_VOID* data,
+-											pvr_next_proc_seq_t next_handler,
+-											pvr_show_proc_seq_t show_handler,
+-											pvr_off2element_proc_seq_t off2element_handler,
+-											pvr_startstop_proc_seq_t startstop_handler,
+-											write_proc_t whandler
+-										  )
+-{
+-	return CreateProcEntryInDirSeq(
+-								   dir,
+-								   name,
+-								   data,
+-								   next_handler,
+-								   show_handler,
+-								   off2element_handler,
+-								   startstop_handler,
+-								   whandler
+-								  );
++	return off == 1 ? (void *)2 : NULL;
+ }
+ 
+-
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreatePerProcessProcEntrySeq
+-
+- @Description
+-
+- Create a file under /proc/pvr/<current process ID>.  Apart from the
+- directory where the file is created, this works the same way as
+- CreateProcEntry. It's seq_file version.
+-
+-
+-
+- @Input name : the name of the file to create
+-
+- @Input data : aditional data that will be passed to handlers
+-
+- @Input next_handler : the function to call to provide the next element. OPTIONAL, if not
+-						supplied, then off2element function is used instead
+-
+- @Input show_handler : the function to call to show element
+-
+- @Input off2element_handler : the function to call when it is needed to translate offest to element
+-
+- @Input startstop_handler : the function to call when output memory page starts or stops. OPTIONAL.
+-
+- @Input  whandler : the function to interpret writes from the user
+-
+- @Return Ptr to proc entry , 0 for failure
+-
+-*****************************************************************************/
+-struct proc_dir_entry* CreatePerProcessProcEntrySeq (
+-									  const IMG_CHAR * name,
+-    								  IMG_VOID* data,
+-									  pvr_next_proc_seq_t next_handler,
+-									  pvr_show_proc_seq_t show_handler,
+-									  pvr_off2element_proc_seq_t off2element_handler,
+-									  pvr_startstop_proc_seq_t startstop_handler,
+-									  write_proc_t whandler
+-									 )
++struct proc_dir_entry *CreateProcReadEntrySeq(const IMG_CHAR *name, IMG_VOID *data,
++		pvr_next_proc_seq_t next_handler, pvr_show_proc_seq_t show_handler,
++		pvr_off2element_proc_seq_t off2element_handler,
++		pvr_startstop_proc_seq_t startstop_handler)
+ {
+-    PVRSRV_ENV_PER_PROCESS_DATA *psPerProc;
+-    IMG_UINT32 ui32PID;
+-
+-    if (!dir)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntrySeq: /proc/%s doesn't exist", PVRProcDirRoot));
+-        return NULL;
+-    }
+-
+-    ui32PID = OSGetCurrentProcessIDKM();
+-
+-    psPerProc = PVRSRVPerProcessPrivateData(ui32PID);
+-    if (!psPerProc)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntrySeq: no per process data"));
+-
+-        return NULL;
+-    }
+-
+-    if (!psPerProc->psProcDir)
+-    {
+-        IMG_CHAR dirname[16];
+-        IMG_INT ret;
+-
+-        ret = snprintf(dirname, sizeof(dirname), "%u", ui32PID);
+-
+-		if (ret <=0 || ret >= (IMG_INT)sizeof(dirname))
+-		{
+-			PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: couldn't generate per process proc directory name \"%u\"", ui32PID));
+-			return NULL;
+-		}
+-		else
+-		{
+-			psPerProc->psProcDir = proc_mkdir(dirname, dir);
+-			if (!psPerProc->psProcDir)
+-			{
+-				PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: couldn't create per process proc directory /proc/%s/%u",
+-						PVRProcDirRoot, ui32PID));
+-				return NULL;
+-			}
+-		}
+-    }
+-
+-    return CreateProcEntryInDirSeq(psPerProc->psProcDir, name, data, next_handler,
+-								   show_handler,off2element_handler,startstop_handler,whandler);
++	return NULL;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : RemoveProcEntrySeq
+-
+- @Description
+-
+- Remove a single node (created using *Seq function) under /proc/pvr.
+-
+- @Input proc_entry : structure returned by Create function.
+-
+- @Return nothing
+-
+-*****************************************************************************/
+-IMG_VOID RemoveProcEntrySeq( struct proc_dir_entry* proc_entry )
++struct proc_dir_entry *CreateProcEntrySeq(const IMG_CHAR *name, IMG_VOID *data,
++		pvr_next_proc_seq_t next_handler, pvr_show_proc_seq_t show_handler,
++		pvr_off2element_proc_seq_t off2element_handler,
++		pvr_startstop_proc_seq_t startstop_handler, write_proc_t whandler)
+ {
+-    if (dir)
+-    {
+-		void* data = proc_entry->data ;
+-        PVR_DPF((PVR_DBG_MESSAGE, "Removing /proc/%s/%s", PVRProcDirRoot, proc_entry->name));
+-
+-        remove_proc_entry(proc_entry->name, dir);
+-		if( data)
+-			kfree( data );
+-
+-    }
++	return NULL;
+ }
+ 
+-/*!
+-******************************************************************************
+-
+- @Function : RemovePerProcessProcEntry Seq
+-
+- @Description
+-
+- Remove a single node under the per process proc directory (created by *Seq function).
+-
+- Remove a single node (created using *Seq function) under /proc/pvr.
+-
+- @Input proc_entry : structure returned by Create function.
+-
+- @Return nothing
+-
+-*****************************************************************************/
+-IMG_VOID RemovePerProcessProcEntrySeq(struct proc_dir_entry* proc_entry)
++struct proc_dir_entry *CreatePerProcessProcEntrySeq(const IMG_CHAR *name, IMG_VOID *data,
++		pvr_next_proc_seq_t next_handler, pvr_show_proc_seq_t show_handler,
++		pvr_off2element_proc_seq_t off2element_handler,
++		pvr_startstop_proc_seq_t startstop_handler, write_proc_t whandler)
+ {
+-    PVRSRV_ENV_PER_PROCESS_DATA *psPerProc;
+-
+-    psPerProc = LinuxTerminatingProcessPrivateData();
+-    if (!psPerProc)
+-    {
+-        psPerProc = PVRSRVFindPerProcessPrivateData();
+-        if (!psPerProc)
+-        {
+-            PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: can't "
+-                                    "remove %s, no per process data", proc_entry->name));
+-            return;
+-        }
+-    }
+-
+-    if (psPerProc->psProcDir)
+-    {
+-		void* data = proc_entry->data ;
+-        PVR_DPF((PVR_DBG_MESSAGE, "Removing proc entry %s from %s", proc_entry->name, psPerProc->psProcDir->name));
+-
+-        remove_proc_entry(proc_entry->name, psPerProc->psProcDir);
+-		if(data)
+-			kfree( data );
+-    }
++	return NULL;
+ }
+ 
+-/*!
+-******************************************************************************
+-
+- @Function : pvr_read_proc_vm
+-
+- @Description
+-
+- When the user accesses the proc filesystem entry for the device, we are
+- called here to create the content for the 'file'.  We can print anything we
+- want here.  If the info we want to return is too big for one page ('count'
+- chars), we return successive chunks on each call. For a number of ways of
+- achieving this, refer to proc_file_read() in linux/fs/proc/generic.c.
+-
+- Here, as we are accessing lists of information, we output '1' in '*start' to
+- instruct proc to advance 'off' by 1 on each call.  The number of chars placed
+- in the buffer is returned.  Multiple calls are made here by the proc
+- filesystem until we set *eof.  We can return zero without setting eof to
+- instruct proc to flush 'page' (causing it to be printed) if there is not
+- enough space left (eg for a complete line).
+-
+- @Input  page : where to write the output
+-
+- @Input  start : memory location into which should be written next offset
+-                 to read from.
+-
+- @Input  off : the offset into the /proc file being read
+-
+- @Input  count : the size of the buffer 'page'
+-
+- @Input  eof : memory location into which 1 should be written when at EOF
+-
+- @Input  data : data specific to this /proc file entry
+-
+- @Return      : length of string written to page
+-
+-*****************************************************************************/
+-static IMG_INT pvr_read_proc(IMG_CHAR *page, IMG_CHAR **start, off_t off,
+-                         IMG_INT count, IMG_INT *eof, IMG_VOID *data)
++IMG_VOID RemoveProcEntrySeq(struct proc_dir_entry *proc_entry)
+ {
+-	/* PRQA S 0307 1 */ /* ignore warning about casting to different pointer type */
+-    pvr_read_proc_t *pprn = (pvr_read_proc_t *)data;
+-
+-    off_t len = pprn (page, (size_t)count, off);
+-
+-    if (len == END_OF_FILE)
+-    {
+-        len  = 0;
+-        *eof = 1;
+-    }
+-    else if (!len)             /* not enough space in the buffer */
+-    {
+-        *start = (IMG_CHAR *) 0;   /* don't advance the offset */
+-    }
+-    else
+-    {
+-        *start = (IMG_CHAR *) 1;
+-    }
+-
+-    return len;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreateProcEntryInDir
+-
+- @Description
+-
+- Create a file under the given directory.  These dynamic files can be used at
+- runtime to get or set information about the device.
+-
+- @Input  pdir : parent directory
+-
+- @Input  name : the name of the file to create
+-
+- @Input  rhandler : the function to supply the content
+-
+- @Input  whandler : the function to interpret writes from the user
+-
+- @Return success code : 0 or -errno.
+-
+-*****************************************************************************/
+-static IMG_INT CreateProcEntryInDir(struct proc_dir_entry *pdir, const IMG_CHAR * name, read_proc_t rhandler, write_proc_t whandler, IMG_VOID *data)
++IMG_VOID RemovePerProcessProcEntrySeq(struct proc_dir_entry *proc_entry)
+ {
+-    struct proc_dir_entry * file;
+-    mode_t mode;
+-
+-    if (!pdir)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcEntryInDir: parent directory doesn't exist"));
+-
+-        return -ENOMEM;
+-    }
+-
+-    mode = S_IFREG;
+-
+-    if (rhandler)
+-    {
+-	mode |= S_IRUGO;
+-    }
+-
+-    if (whandler)
+-    {
+-	mode |= S_IWUSR;
+-    }
+-
+-    file = create_proc_entry(name, mode, pdir);
+-
+-    if (file)
+-    {
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30))
+-        file->owner = THIS_MODULE;
+-#endif
+-		file->read_proc = rhandler;
+-		file->write_proc = whandler;
+-		file->data = data;
+-
+-		PVR_DPF((PVR_DBG_MESSAGE, "Created proc entry %s in %s", name, pdir->name));
+-
+-        return 0;
+-    }
+-
+-    PVR_DPF((PVR_DBG_ERROR, "CreateProcEntry: cannot create proc entry %s in %s", name, pdir->name));
+-
+-    return -ENOMEM;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreateProcEntry
+-
+- @Description
+-
+- Create a file under /proc/pvr.  These dynamic files can be used at runtime
+- to get or set information about the device.
+-
+- This interface is fuller than CreateProcReadEntry, and supports write access;
+- it is really just a wrapper for the native linux functions.
+-
+- @Input  name : the name of the file to create under /proc/pvr
+-
+- @Input  rhandler : the function to supply the content
+-
+- @Input  whandler : the function to interpret writes from the user
+-
+- @Return success code : 0 or -errno.
+-
+-*****************************************************************************/
+-IMG_INT CreateProcEntry(const IMG_CHAR * name, read_proc_t rhandler, write_proc_t whandler, IMG_VOID *data)
++IMG_INT CreateProcEntry(const IMG_CHAR *name, read_proc_t rhandler, write_proc_t whandler,
++			IMG_VOID *data)
+ {
+-    return CreateProcEntryInDir(dir, name, rhandler, whandler, data);
++	return 0;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreatePerProcessProcEntry
+-
+- @Description
+-
+- Create a file under /proc/pvr/<current process ID>.  Apart from the
+- directory where the file is created, this works the same way as
+- CreateProcEntry.
+-
+- @Input  name : the name of the file to create under the per process /proc directory
+-
+- @Input  rhandler : the function to supply the content
+-
+- @Input  whandler : the function to interpret writes from the user
+-
+- @Return success code : 0 or -errno.
+-
+-*****************************************************************************/
+-IMG_INT CreatePerProcessProcEntry(const IMG_CHAR * name, read_proc_t rhandler, write_proc_t whandler, IMG_VOID *data)
++IMG_INT CreatePerProcessProcEntry(const IMG_CHAR *name, read_proc_t rhandler,
++				  write_proc_t whandler, IMG_VOID *data)
+ {
+-    PVRSRV_ENV_PER_PROCESS_DATA *psPerProc;
+-    IMG_UINT32 ui32PID;
+-
+-    if (!dir)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: /proc/%s doesn't exist", PVRProcDirRoot));
+-
+-        return -ENOMEM;
+-    }
+-
+-    ui32PID = OSGetCurrentProcessIDKM();
+-
+-    psPerProc = PVRSRVPerProcessPrivateData(ui32PID);
+-    if (!psPerProc)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: no per process data"));
+-
+-        return -ENOMEM;
+-    }
+-
+-    if (!psPerProc->psProcDir)
+-    {
+-        IMG_CHAR dirname[16];
+-        IMG_INT ret;
+-
+-        ret = snprintf(dirname, sizeof(dirname), "%u", ui32PID);
+-
+-		if (ret <=0 || ret >= (IMG_INT)sizeof(dirname))
+-		{
+-			PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: couldn't generate per process proc directory name \"%u\"", ui32PID));
+-
+-					return -ENOMEM;
+-		}
+-		else
+-		{
+-			psPerProc->psProcDir = proc_mkdir(dirname, dir);
+-			if (!psPerProc->psProcDir)
+-			{
+-			PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: couldn't create per process proc directory /proc/%s/%u", PVRProcDirRoot, ui32PID));
+-
+-			return -ENOMEM;
+-			}
+-		}
+-    }
+-
+-    return CreateProcEntryInDir(psPerProc->psProcDir, name, rhandler, whandler, data);
++	return 0;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function :  CreateProcReadEntry
+-
+- @Description
+-
+- Create a file under /proc/pvr.  These dynamic files can be used at runtime
+- to get information about the device.  Creation WILL fail if proc support is
+- not compiled into the kernel.  That said, the Linux kernel is not even happy
+- to build without /proc support these days.
+-
+- @Input name : the name of the file to create
+-
+- @Input handler : the function to call to provide the content
+-
+- @Return 0 for success, -errno for failure
+-
+-*****************************************************************************/
+-IMG_INT CreateProcReadEntry(const IMG_CHAR * name, pvr_read_proc_t handler)
++IMG_INT CreateProcReadEntry(const IMG_CHAR *name, pvr_read_proc_t handler)
+ {
+-    struct proc_dir_entry * file;
+-
+-    if (!dir)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcReadEntry: cannot make proc entry /proc/%s/%s: no parent", PVRProcDirRoot, name));
+-
+-        return -ENOMEM;
+-    }
+-
+-	/* PRQA S 0307 1 */ /* ignore warning about casting to different pointer type */
+-    file = create_proc_read_entry (name, S_IFREG | S_IRUGO, dir, pvr_read_proc, (IMG_VOID *)handler);
+-
+-    if (file)
+-    {
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30))
+-        file->owner = THIS_MODULE;
+-#endif
+-        return 0;
+-    }
+-
+-    PVR_DPF((PVR_DBG_ERROR, "CreateProcReadEntry: cannot make proc entry /proc/%s/%s: no memory", PVRProcDirRoot, name));
+-
+-    return -ENOMEM;
++	return 0;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : CreateProcEntries
+-
+- @Description
+-
+- Create a directory /proc/pvr and the necessary entries within it.  These
+- dynamic files can be used at runtime to get information about the device.
+- Creation might fail if proc support is not compiled into the kernel or if
+- there is no memory
+-
+- @Input none
+-
+- @Return nothing
+-
+-*****************************************************************************/
+ IMG_INT CreateProcEntries(IMG_VOID)
+ {
+-    dir = proc_mkdir (PVRProcDirRoot, NULL);
+-
+-    if (!dir)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcEntries: cannot make /proc/%s directory", PVRProcDirRoot));
+-
+-        return -ENOMEM;
+-    }
+-
+-	g_pProcQueue = CreateProcReadEntrySeq("queue", NULL, NULL, ProcSeqShowQueue, ProcSeqOff2ElementQueue, NULL);
+-	g_pProcVersion = CreateProcReadEntrySeq("version", NULL, NULL, ProcSeqShowVersion, ProcSeq1ElementHeaderOff2Element, NULL);
+-	g_pProcSysNodes = CreateProcReadEntrySeq("nodes", NULL, NULL, ProcSeqShowSysNodes, ProcSeqOff2ElementSysNodes, NULL);
+-
+-	if(!g_pProcQueue || !g_pProcVersion || !g_pProcSysNodes)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcEntries: couldn't make /proc/%s files", PVRProcDirRoot));
+-
+-        return -ENOMEM;
+-    }
+-
+-
+-#ifdef DEBUG
+-
+-	g_pProcDebugLevel = CreateProcEntrySeq("debug_level", NULL, NULL,
+-											ProcSeqShowDebugLevel,
+-											ProcSeq1ElementOff2Element, NULL,
+-										    (IMG_VOID*)PVRDebugProcSetLevel);
+-	if(!g_pProcDebugLevel)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcEntries: couldn't make /proc/%s/debug_level", PVRProcDirRoot));
+-
+-        return -ENOMEM;
+-    }
+-
+-#ifdef PVR_MANUAL_POWER_CONTROL
+-	g_pProcPowerLevel = CreateProcEntrySeq("power_control", NULL, NULL,
+-											ProcSeqShowPowerLevel,
+-											ProcSeq1ElementOff2Element, NULL,
+-										    PVRProcSetPowerLevel);
+-	if(!g_pProcPowerLevel)
+-    {
+-        PVR_DPF((PVR_DBG_ERROR, "CreateProcEntries: couldn't make /proc/%s/power_control", PVRProcDirRoot));
+-
+-        return -ENOMEM;
+-    }
+-#endif
+-#endif
+-
+-    return 0;
++	return 0;
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : RemoveProcEntry
+-
+- @Description
+-
+- Remove a single node under /proc/pvr.
+-
+- @Input name : the name of the node to remove
+-
+- @Return nothing
+-
+-*****************************************************************************/
+-IMG_VOID RemoveProcEntry(const IMG_CHAR * name)
++IMG_VOID RemoveProcEntry(const IMG_CHAR *name)
+ {
+-    if (dir)
+-    {
+-        remove_proc_entry(name, dir);
+-        PVR_DPF((PVR_DBG_MESSAGE, "Removing /proc/%s/%s", PVRProcDirRoot, name));
+-    }
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : RemovePerProcessProcEntry
+-
+- @Description
+-
+- Remove a single node under the per process proc directory.
+-
+- @Input name : the name of the node to remove
+-
+- @Return nothing
+-
+-*****************************************************************************/
+ IMG_VOID RemovePerProcessProcEntry(const IMG_CHAR *name)
+ {
+-    PVRSRV_ENV_PER_PROCESS_DATA *psPerProc;
+-
+-    psPerProc = LinuxTerminatingProcessPrivateData();
+-    if (!psPerProc)
+-    {
+-        psPerProc = PVRSRVFindPerProcessPrivateData();
+-        if (!psPerProc)
+-        {
+-            PVR_DPF((PVR_DBG_ERROR, "CreatePerProcessProcEntries: can't "
+-                                    "remove %s, no per process data", name));
+-            return;
+-        }
+-    }
+-
+-    if (psPerProc->psProcDir)
+-    {
+-        remove_proc_entry(name, psPerProc->psProcDir);
+-
+-        PVR_DPF((PVR_DBG_MESSAGE, "Removing proc entry %s from %s", name, psPerProc->psProcDir->name));
+-    }
+ }
+ 
+-
+-/*!
+-******************************************************************************
+-
+- @Function : RemovePerProcessProcDir
+-
+- @Description
+-
+- Remove the per process directorty under /proc/pvr.
+-
+- @Input psPerProc : environment specific per process data
+-
+- @Return nothing
+-
+-*****************************************************************************/
+ IMG_VOID RemovePerProcessProcDir(PVRSRV_ENV_PER_PROCESS_DATA *psPerProc)
+ {
+-    if (psPerProc->psProcDir)
+-    {
+-        while (psPerProc->psProcDir->subdir)
+-        {
+-            PVR_DPF((PVR_DBG_WARNING, "Belatedly removing /proc/%s/%s/%s", PVRProcDirRoot, psPerProc->psProcDir->name, psPerProc->psProcDir->subdir->name));
+-
+-            RemoveProcEntry(psPerProc->psProcDir->subdir->name);
+-        }
+-        RemoveProcEntry(psPerProc->psProcDir->name);
+-    }
+ }
+ 
+-/*!
+-******************************************************************************
+-
+- @Function    : RemoveProcEntries
+-
+- Description
+-
+- Proc filesystem entry deletion - Remove all proc filesystem entries for
+- the driver.
+-
+- @Input none
+-
+- @Return nothing
+-
+-*****************************************************************************/
+ IMG_VOID RemoveProcEntries(IMG_VOID)
+ {
+-#ifdef DEBUG
+-	RemoveProcEntrySeq( g_pProcDebugLevel );
+-#ifdef PVR_MANUAL_POWER_CONTROL
+-	RemoveProcEntrySeq( g_pProcPowerLevel );
+-#endif /* PVR_MANUAL_POWER_CONTROL */
+-#endif
+-
+-	RemoveProcEntrySeq(g_pProcQueue);
+-	RemoveProcEntrySeq(g_pProcVersion);
+-	RemoveProcEntrySeq(g_pProcSysNodes);
+-
+-	while (dir->subdir)
+-	{
+-		PVR_DPF((PVR_DBG_WARNING, "Belatedly removing /proc/%s/%s", PVRProcDirRoot, dir->subdir->name));
+-
+-		RemoveProcEntry(dir->subdir->name);
+-	}
+-
+-	remove_proc_entry(PVRProcDirRoot, NULL);
+-}
+-
+-/*****************************************************************************
+- FUNCTION	:	ProcSeqShowVersion
+-
+- PURPOSE	:	Print the content of version to /proc file
+-
+- PARAMETERS	:	sfile - /proc seq_file
+-				el - Element to print
+-*****************************************************************************/
+-static void ProcSeqShowVersion(struct seq_file *sfile,void* el)
+-{
+-	SYS_DATA *psSysData;
+-	IMG_CHAR *pszSystemVersionString = "None";
+-
+-	if(el == PVR_PROC_SEQ_START_TOKEN)
+-	{
+-		seq_printf(sfile,
+-				"Version %s (%s) %s\n",
+-				PVRVERSION_STRING,
+-				PVR_BUILD_TYPE, PVR_BUILD_DIR);
+-		return;
+-	}
+-
+-	psSysData = SysAcquireDataNoCheck();
+-	if(psSysData != IMG_NULL && psSysData->pszVersionString != IMG_NULL)
+-	{
+-		pszSystemVersionString = psSysData->pszVersionString;
+-	}
+-
+-	seq_printf( sfile, "System Version String: %s\n", pszSystemVersionString);
+-}
+-
+-/*!
+-******************************************************************************
+-
+- @Function	procDumpSysNodes (plus deviceTypeToString and deviceClassToString)
+-
+- @Description
+-
+- Format the contents of /proc/pvr/nodes
+-
+- @Input buf : where to place format contents data.
+-
+- @Input size : the size of the buffer into which to place data
+-
+- @Input off : how far into the file we are.
+-
+- @Return   amount of data placed in buffer, 0, or END_OF_FILE :
+-
+-******************************************************************************/
+-static const IMG_CHAR *deviceTypeToString(PVRSRV_DEVICE_TYPE deviceType)
+-{
+-    switch (deviceType)
+-    {
+-        default:
+-        {
+-            static IMG_CHAR text[10];
+-
+-            sprintf(text, "?%x", (IMG_UINT)deviceType);
+-
+-            return text;
+-        }
+-    }
+-}
+-
+-
+-static const IMG_CHAR *deviceClassToString(PVRSRV_DEVICE_CLASS deviceClass)
+-{
+-    switch (deviceClass)
+-    {
+-	case PVRSRV_DEVICE_CLASS_3D:
+-	{
+-	    return "3D";
+-	}
+-	case PVRSRV_DEVICE_CLASS_DISPLAY:
+-	{
+-	    return "display";
+-	}
+-	case PVRSRV_DEVICE_CLASS_BUFFER:
+-	{
+-	    return "buffer";
+-	}
+-	default:
+-	{
+-	    static IMG_CHAR text[10];
+-
+-	    sprintf(text, "?%x", (IMG_UINT)deviceClass);
+-	    return text;
+-	}
+-    }
+-}
+-
+-static IMG_VOID* DecOffPsDev_AnyVaCb(PVRSRV_DEVICE_NODE *psNode, va_list va)
+-{
+-	off_t *pOff = va_arg(va, off_t*);
+-	if (--(*pOff))
+-	{
+-		return IMG_NULL;
+-	}
+-	else
+-	{
+-		return psNode;
+-	}
+-}
+-
+-/*****************************************************************************
+- FUNCTION	:	ProcSeqShowSysNodes
+-
+- PURPOSE	:	Print the content of version to /proc file
+-
+- PARAMETERS	:	sfile - /proc seq_file
+-				el - Element to print
+-*****************************************************************************/
+-static void ProcSeqShowSysNodes(struct seq_file *sfile,void* el)
+-{
+-	PVRSRV_DEVICE_NODE *psDevNode;
+-
+-	if(el == PVR_PROC_SEQ_START_TOKEN)
+-	{
+-		seq_printf( sfile,
+-						"Registered nodes\n"
+-						"Addr     Type     Class    Index Ref pvDev     Size Res\n");
+-		return;
+-	}
+-
+-	psDevNode = (PVRSRV_DEVICE_NODE*)el;
+-
+-	seq_printf( sfile,
+-			  "%p %-8s %-8s %4d  %2u  %p  %3u  %p\n",
+-			  psDevNode,
+-			  deviceTypeToString(psDevNode->sDevId.eDeviceType),
+-			  deviceClassToString(psDevNode->sDevId.eDeviceClass),
+-			  psDevNode->sDevId.eDeviceClass,
+-			  psDevNode->ui32RefCount,
+-			  psDevNode->pvDevice,
+-			  psDevNode->ui32pvDeviceSize,
+-			  psDevNode->hResManContext);
+ }
+-
+-/*****************************************************************************
+- FUNCTION	:	ProcSeqOff2ElementSysNodes
+-
+- PURPOSE	:	Transale offset to element (/proc stuff)
+-
+- PARAMETERS	:	sfile - /proc seq_file
+-				off - the offset into the buffer
+-
+- RETURNS    :   element to print
+-*****************************************************************************/
+-static void* ProcSeqOff2ElementSysNodes(struct seq_file * sfile, loff_t off)
+-{
+-    SYS_DATA *psSysData;
+-    PVRSRV_DEVICE_NODE*psDevNode = IMG_NULL;
+-    
+-    PVR_UNREFERENCED_PARAMETER(sfile);
+-    
+-    if(!off)
+-    {
+-	return PVR_PROC_SEQ_START_TOKEN;
+-    }
+-
+-    psSysData = SysAcquireDataNoCheck();
+-    if (psSysData != IMG_NULL)
+-    {
+-	/* Find Dev Node */
+-	psDevNode = (PVRSRV_DEVICE_NODE*)
+-			List_PVRSRV_DEVICE_NODE_Any_va(psSysData->psDeviceNodeList,
+-													DecOffPsDev_AnyVaCb,
+-													&off);
+-    }
+-
+-    /* Return anything that is not PVR_RPOC_SEQ_START_TOKEN and NULL */
+-    return (void*)psDevNode;
+-}
+-
+-/*****************************************************************************
+- End of file (proc.c)
+-*****************************************************************************/
+diff --git a/services4/srvkm/env/linux/proc.h b/services4/srvkm/env/linux/proc.h
+index bc2a554..2e3f0be 100644
+--- a/services4/srvkm/env/linux/proc.h
++++ b/services4/srvkm/env/linux/proc.h
+@@ -44,7 +44,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #ifndef __SERVICES_PROC_H__
+ #define __SERVICES_PROC_H__
+ 
+-#include <asm/system.h>		// va_list etc
++/* asm/system.h: gone since Linux 3.4 */
+ #include <linux/proc_fs.h>	// read_proc_t etc
+ #include <linux/seq_file.h> // seq_file
+ 
+@@ -52,6 +52,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+ typedef off_t (pvr_read_proc_t)(IMG_CHAR *, size_t, off_t);
+ 
++/* Linux 3.10 removed read_proc_t/write_proc_t; /proc/pvr is not built (see proc.c) */
++typedef IMG_VOID *read_proc_t;
++typedef IMG_VOID *write_proc_t;
++
+ 
+ #define PVR_PROC_SEQ_START_TOKEN (void*)1
+ typedef void* (pvr_next_proc_seq_t)(struct seq_file *,void*,loff_t);
+diff --git a/services4/srvkm/env/linux/pvr_debug.c b/services4/srvkm/env/linux/pvr_debug.c
+index 04e42ad..0f5ce87 100644
+--- a/services4/srvkm/env/linux/pvr_debug.c
++++ b/services4/srvkm/env/linux/pvr_debug.c
+@@ -55,7 +55,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #include <linux/module.h>
+ #include <linux/spinlock.h>
+ #include <linux/string.h>			// strncpy, strlen
+-#include <stdarg.h>
++#include <linux/stdarg.h>
+ #include "img_types.h"
+ #include "servicesext.h"
+ #include "pvr_debug.h"
+diff --git a/services4/srvkm/env/linux/pvr_uaccess.h b/services4/srvkm/env/linux/pvr_uaccess.h
+index 7583d7e..736eab9 100644
+--- a/services4/srvkm/env/linux/pvr_uaccess.h
++++ b/services4/srvkm/env/linux/pvr_uaccess.h
+@@ -54,7 +54,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ static inline unsigned long pvr_copy_to_user(void __user *pvTo, const void *pvFrom, unsigned long ulBytes)
+ {
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
+-    if (access_ok(VERIFY_WRITE, pvTo, ulBytes))
++    if (access_ok(pvTo, ulBytes))
+     {
+ 	return __copy_to_user(pvTo, pvFrom, ulBytes);
+     }
+@@ -71,7 +71,7 @@ static inline unsigned long pvr_copy_from_user(void *pvTo, const void __user *pv
+      * The compile time correctness checking introduced for copy_from_user in
+      * Linux 2.6.33 isn't fully comaptible with our usage of the function.
+      */
+-    if (access_ok(VERIFY_READ, pvFrom, ulBytes))
++    if (access_ok(pvFrom, ulBytes))
+     {
+ 	return __copy_from_user(pvTo, pvFrom, ulBytes);
+     }
+diff --git a/services4/srvkm/include/lists.h b/services4/srvkm/include/lists.h
+index 81205de..28c31c4 100644
+--- a/services4/srvkm/include/lists.h
++++ b/services4/srvkm/include/lists.h
+@@ -45,7 +45,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+ /* instruct QAC to ignore warnings about the following custom formatted macros */
+ /* PRQA S 0881,3410 ++ */
+-#include <stdarg.h>
++#include <linux/stdarg.h>
+ #include "img_types.h"
+ 
+ /*
+diff --git a/services4/srvkm/include/osfunc.h b/services4/srvkm/include/osfunc.h
+index 1d8e0a2..d5d0c15 100644
+--- a/services4/srvkm/include/osfunc.h
++++ b/services4/srvkm/include/osfunc.h
+@@ -54,7 +54,7 @@ extern "C" {
+ #if defined(__linux__) && defined(__KERNEL__)
+ #include <linux/hardirq.h>
+ #include <linux/string.h>
+-#include <asm/system.h>
++/* asm/system.h: gone since Linux 3.4 */
+ #if defined(__arm__)
+ #include <asm/memory.h>
+ #endif
+diff --git a/services4/srvkm/include/pdump_osfunc.h b/services4/srvkm/include/pdump_osfunc.h
+index 0f2e103..af33de0 100644
+--- a/services4/srvkm/include/pdump_osfunc.h
++++ b/services4/srvkm/include/pdump_osfunc.h
+@@ -39,7 +39,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */ /**************************************************************************/
+ 
+-#include <stdarg.h>
++#include <linux/stdarg.h>
+ 
+ #if defined(__cplusplus)
+ extern "C" {
+-- 
+2.47.3
+

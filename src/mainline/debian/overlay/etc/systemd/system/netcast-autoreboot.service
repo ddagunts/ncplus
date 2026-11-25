@@ -1,0 +1,13 @@
+# Optional return to LG's software: reboot after netcast.reboot=<s> from the kernel command
+# line (default 0 = stay in Debian; test DTBs set it) unless /run/stay exists.
+[Unit]
+Description=NetCast: return to the stock software after a while
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/netcast-autoreboot
+
+[Install]
+WantedBy=sysinit.target

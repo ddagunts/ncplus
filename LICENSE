@@ -19,3 +19,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---------------------------------------------------------------------------
+Exceptions: these parts of the repository are under their own licenses.
+
+  src/kmod/                    GPL-2.0 (Linux kernel modules; xpad.c is the
+                               Linux 3.0.13 driver, unmodified)
+  third_party/patches/         the license of the project each patch modifies:
+                               sdl2-*.patch  zlib (SDL)
+                               qtbase-*.patch  LGPL-3.0-only or GPL (Qt)
+  third_party/stb/             public domain or MIT (see the file header)
+  third_party/dr_libs/         public domain (Unlicense) or MIT-0
+  third_party/khronos/         Apache-2.0 / MIT (see the file headers)
+
+Components fetched by third_party/build-deps.sh and bundled in the USB
+package keep their own licenses; build/package.sh copies them into
+netcast/LICENSES/.

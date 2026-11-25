@@ -1,0 +1,14 @@
+# Opt-in SGX544 bring-up (pvrsrvkm + LG's GLES2 userspace, off-screen test), logged to the
+# kernel log. Create <stick>/netcast/mainline/pvrtest to run it once per boot.
+[Unit]
+Description=NetCast: SGX544 GPU test (pvrsrvkm, sgxgltest)
+ConditionPathExists=/mnt/stick/netcast/mainline/pvrtest
+After=systemd-udev-settle.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/netcast-pvr
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
