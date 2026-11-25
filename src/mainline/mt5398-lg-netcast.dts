@@ -7,7 +7,7 @@
  * (arch/arm/mach-mt53xx). Nothing here drives clocks, regulators, pinmux or panel timing:
  * the kernel touches the A9 private peripherals, OSD plane 3 (simplefb, then the mt5398_osd
  * KMS driver), the BIM interrupt gate, the four MUSB USB host ports (clocks and VBUS as the
- * stock kernel left them), one SIF I2C master for the MICOM's backlight command and, only on
+ * stock kernel left them), one SIF I2C master for the MICOM (backlight, IR remote) and, only on
  * request, the SGX544's ID and reset registers.
  *
  * The panel is 1920x1080; stock shows OSD plane 3 as a 1280x720 bitmap upscaled 1.5x by the
@@ -305,23 +305,34 @@
 		};
 
 		/*
-		 * SIF I2C master 0 (BIM + 0x21240) on MediaTek's bus 1 = the osda2/oscl2 pads
-		 * (CKGEN +0x404 [1:0] = 1), at LG's clock divider 380 (27 MHz / 380). The pad mux
-		 * is set before every transfer: the stock kernel switches it between buses.
+		 * SIF I2C master 0 (BIM + 0x21240) on MediaTek's bus 2 = the osda1/oscl1 pads
+		 * (CKGEN +0x600 [21:20] = 2; LG's /dev/mtal calls it bus 1). LG runs it at 380 kHz,
+		 * and at 100 kHz in U-Boot. The pad mux is set before every transfer: the stock
+		 * kernel switches it between buses.
 		 */
 		i2c@f0029240 {
 			compatible = "mediatek,mt5398-sif";
-			reg = <0xf0029240 0x48>, <0xf000d400 0x8>;
+			reg = <0xf0029240 0x48>, <0xf000d600 0x8>;
 			reg-names = "sif", "pinmux";
-			mediatek,sif-bus = <1>;
-			clock-frequency = <71053>;
+			mediatek,sif-bus = <2>;
+			clock-frequency = <100000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 
-			/* LG's MICOM (standby MCU): 8-bit address 0x52; {0x36,0,0} on, {0x37,0,0} off */
-			backlight: backlight@29 {
-				compatible = "lg,netcast-micom-backlight";
+			/* LG's MICOM (standby MCU): 8-bit address 0x52 */
+			micom@29 {
+				compatible = "lg,netcast-micom";
 				reg = <0x29>;
+
+				/* {0x36,0,0} on, {0x37,0,0} off */
+				backlight: backlight {
+					compatible = "lg,netcast-micom-backlight";
+				};
+
+				/* register 0xc0: {event, NEC command, ~command} */
+				ir-receiver {
+					compatible = "lg,netcast-micom-ir";
+				};
 			};
 		};
 

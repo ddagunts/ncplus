@@ -11,7 +11,7 @@ diff -ruN a/drivers/i2c/busses/Kconfig b/drivers/i2c/busses/Kconfig
 +	help
 +	  The SIF engine of the MediaTek MT5398 TV SoC (LG NetCast), one
 +	  master muxed onto MediaTek's system, tuner or second I2C pads.
-+	  On LG NetCast TVs the MICOM (power, backlight) is on the tuner pads.
++	  On LG NetCast TVs the MICOM (power, backlight, IR) is on the second pads.
 +
  config I2C_MV64XXX
  	tristate "Marvell mv64xxx I2C Controller"
@@ -36,7 +36,7 @@ diff -ruN a/drivers/video/backlight/Kconfig b/drivers/video/backlight/Kconfig
  
 +config BACKLIGHT_LG_MICOM
 +	tristate "LG NetCast MICOM backlight"
-+	depends on I2C
++	depends on MFD_LG_MICOM
 +	help
 +	  On/off control of the panel backlight of LG NetCast TVs through
 +	  the MICOM (LG's standby microcontroller) over I2C.

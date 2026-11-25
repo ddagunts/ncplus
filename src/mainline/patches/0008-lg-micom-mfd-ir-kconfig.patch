@@ -1,0 +1,56 @@
+diff -ruN a/drivers/media/rc/Kconfig b/drivers/media/rc/Kconfig
+--- a/drivers/media/rc/Kconfig
++++ b/drivers/media/rc/Kconfig
+@@ -261,6 +261,13 @@
+ 	   To compile this driver as a module, choose M here: the
+ 	   module will be called ite-cir.
+ 
++config IR_LG_MICOM
++	tristate "LG NetCast IR remote (MICOM)"
++	depends on MFD_LG_MICOM
++	help
++	  Say Y here for the IR remote and the buttons of LG NetCast TVs.
++	  The TV's MICOM decodes LG's own remote codes, others don't work.
++
+ config IR_MCEUSB
+ 	tristate "Windows Media Center Ed. eHome Infrared Transceiver"
+ 	depends on USB
+diff -ruN a/drivers/media/rc/Makefile b/drivers/media/rc/Makefile
+--- a/drivers/media/rc/Makefile
++++ b/drivers/media/rc/Makefile
+@@ -36,6 +36,7 @@
+ obj-$(CONFIG_IR_IMON) += imon.o
+ obj-$(CONFIG_IR_IMON_RAW) += imon_raw.o
+ obj-$(CONFIG_IR_ITE_CIR) += ite-cir.o
++obj-$(CONFIG_IR_LG_MICOM) += lg-micom-ir.o
+ obj-$(CONFIG_IR_MCEUSB) += mceusb.o
+ obj-$(CONFIG_IR_MESON) += meson-ir.o
+ obj-$(CONFIG_IR_MESON_TX) += meson-ir-tx.o
+diff -ruN a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -1541,6 +1541,13 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called ti_am335x_tscadc.
+ 
++config MFD_LG_MICOM
++	tristate "LG NetCast MICOM"
++	depends on I2C && OF
++	help
++	  The standby/power microcontroller of LG NetCast TVs, reached over
++	  I2C. Its backlight and IR remote functions have their own options.
++
+ config MFD_LP3943
+ 	tristate "TI/National Semiconductor LP3943 MFD Driver"
+ 	depends on I2C
+diff -ruN a/drivers/mfd/Makefile b/drivers/mfd/Makefile
+--- a/drivers/mfd/Makefile
++++ b/drivers/mfd/Makefile
+@@ -149,6 +149,7 @@
+ obj-$(CONFIG_MFD_AXP20X_I2C)	+= axp20x-i2c.o
+ obj-$(CONFIG_MFD_AXP20X_RSB)	+= axp20x-rsb.o
+ 
++obj-$(CONFIG_MFD_LG_MICOM)	+= lg-micom.o
+ obj-$(CONFIG_MFD_LP3943)	+= lp3943.o
+ obj-$(CONFIG_MFD_LP8788)	+= lp8788.o lp8788-irq.o
+ 

@@ -2,6 +2,8 @@
 /*
  * I2C master for the SIF ("serial interface") engine of the MediaTek MT5398 TV SoC
  * (LG NetCast), the one LG's GPL U-Boot drives as SIF engine V2 (board/mt5398/module).
+ * Where that U-Boot and the TV's own kernel module (dtv_driver_adpt.ko, disassembled)
+ * disagree - pad mux, deglitch, clock stretching - this follows the module.
  *
  * The engine is byte-command driven: CTRL1 takes one command (start, write up to 8 bytes,
  * read up to 8 bytes with ACK or with a final NACK, stop), TRI starts it and reads back 1
@@ -9,12 +11,17 @@
  * through D0/D1, LSB first. MediaTek's later MT7621 I2C block has the same command layout.
  *
  * MediaTek's SIF bus 0 (system), 1 (tuner) and 2 (second) all use this one master; what
- * tells them apart is the pin mux in CKGEN +0x400/+0x404, which LG sets before every
- * transfer. "mediatek,sif-bus" picks the pads; this driver sets them at probe and before
- * each transfer, since the stock kernel may have left another bus selected. LG NetCast's
- * MICOM (power, backlight) is on bus 1, the osda2/oscl2 pads.
+ * tells them apart is the pin mux in CKGEN +0x600/+0x604 (the U-Boot source says
+ * +0x400/+0x404), which LG sets before every transfer. "mediatek,sif-bus" picks the
+ * pads; this driver sets them at probe and before each transfer, since the stock kernel may
+ * have left another bus selected. LG NetCast's MICOM (power, backlight, IR) is on bus 2, the
+ * osda1/oscl1 pads. Beware: LG's /dev/mtal ioctls call that one bus 1, the module swaps 1
+ * and 2 before it calls the SIF driver.
  *
- * Polled: TRI is short-lived (an 8-byte command takes ~1 ms at 71 kHz).
+ * LG runs the master with clock stretching and deglitch level 3 for every device. With
+ * stretching on, the divider is reduced by 6 (2 x the deglitch level) for the same rate.
+ *
+ * Polled: TRI is short-lived (an 8-byte command takes ~0.8 ms at 100 kHz).
  */
 
 #include <linux/bitfield.h>
@@ -31,6 +38,7 @@
 #define  CTRL0_CLK_DIV		GENMASK(27, 16)	/* SCL = 27 MHz / div */
 #define  CTRL0_DEGLITCH		GENMASK(15, 8)
 #define  CTRL0_DEGLITCH_EN	BIT(5)
+#define  DEGLITCH_LEVEL	3
 #define  CTRL0_SCL		BIT(3)		/* line states, read only */
 #define  CTRL0_SDA		BIT(2)
 #define  CTRL0_EN		BIT(1)
@@ -42,8 +50,6 @@
 #define  CTRL1_TRI		BIT(0)
 #define SIF_D0			0x10
 #define SIF_D1			0x14
-#define SIF_CTRL3		0x44		/* "new mode" auto sequencer: kept off */
-#define  CTRL3_NEW_MODE		0xff7f0000
 
 #define MODE_START		1
 #define MODE_WRITE		2
@@ -58,35 +64,36 @@ struct sif {
 	struct i2c_adapter adap;
 	struct device *dev;
 	void __iomem *base;
-	void __iomem *pinmux;		/* CKGEN +0x400, +0x404 */
+	void __iomem *pinmux;		/* CKGEN +0x600, +0x604 */
 	u32 bus;
 	u32 div;
+	bool atomic;			/* power-off: no sleeping */
 };
 
-/* LG's SIF_MtkCfgPinSetFunc() for buses 0..2. */
+/* SIF_MtkCfgPinSetFunc() of the stock module for buses 0..2. */
 static void sif_pinmux(struct sif *s)
 {
 	u32 a = readl(s->pinmux), b = readl(s->pinmux + 4);
 
 	switch (s->bus) {
-	case 0:		/* osda0/oscl0: a[21:20] = 1, a[23:22] != 2, b[1:0] != 1 */
-		if ((a & GENMASK(23, 22)) == 0x00800000)
-			a &= ~GENMASK(23, 22);
-		a = (a & ~GENMASK(21, 20)) | 0x00100000;
+	case 0:		/* osda0/oscl0: a[19:18] = 1, a[21:20] != 2, b[1:0] != 1 */
+		if ((a & GENMASK(21, 20)) == 0x00200000)
+			a &= ~GENMASK(21, 20);
+		a = (a & ~GENMASK(19, 18)) | 0x00040000;
 		if ((b & GENMASK(1, 0)) == 1)
 			b &= ~GENMASK(1, 0);
 		break;
-	case 1:		/* osda2/oscl2: b[1:0] = 1, a[23:22] != 2, a[21:20] != 1 */
-		if ((a & GENMASK(23, 22)) == 0x00800000)
-			a &= ~GENMASK(23, 22);
-		if ((a & GENMASK(21, 20)) == 0x00100000)
+	case 1:		/* osda2/oscl2: b[1:0] = 1, a[21:20] != 2, a[19:18] != 1 */
+		if ((a & GENMASK(21, 20)) == 0x00200000)
 			a &= ~GENMASK(21, 20);
+		if ((a & GENMASK(19, 18)) == 0x00040000)
+			a &= ~GENMASK(19, 18);
 		b = (b & ~GENMASK(1, 0)) | 1;
 		break;
-	case 2:		/* osda1/oscl1: a[23:22] = 2, a[21:20] != 1, b[1:0] != 1 */
-		a = (a & ~GENMASK(23, 22)) | 0x00800000;
-		if ((a & GENMASK(21, 20)) == 0x00100000)
-			a &= ~GENMASK(21, 20);
+	case 2:		/* osda1/oscl1: a[21:20] = 2, a[19:18] != 1, b[1:0] != 1 */
+		a = (a & ~GENMASK(21, 20)) | 0x00200000;
+		if ((a & GENMASK(19, 18)) == 0x00040000)
+			a &= ~GENMASK(19, 18);
 		if ((b & GENMASK(1, 0)) == 1)
 			b &= ~GENMASK(1, 0);
 		break;
@@ -106,10 +113,13 @@ static int sif_cmd(struct sif *s, unsigned int mode, unsigned int len)
 	if (len)
 		v |= FIELD_PREP(CTRL1_PGLEN, len - 1);
 	writel(v, s->base + SIF_CTRL1);
-	ret = readl_poll_timeout(s->base + SIF_CTRL1, v, !(v & CTRL1_TRI), 10, 100000);
+	if (s->atomic)
+		ret = readl_poll_timeout_atomic(s->base + SIF_CTRL1, v, !(v & CTRL1_TRI), 10, 100000);
+	else
+		ret = readl_poll_timeout(s->base + SIF_CTRL1, v, !(v & CTRL1_TRI), 10, 100000);
 	if (ret) {
-		dev_err(s->dev, "command %u timed out (ctrl0 %08x ctrl1 %08x)\n", mode,
-			readl(s->base + SIF_CTRL0), v);
+		dev_err_ratelimited(s->dev, "command %u timed out (ctrl0 %08x ctrl1 %08x)\n", mode,
+				    readl(s->base + SIF_CTRL0), v);
 		return ret;
 	}
 	return FIELD_GET(CTRL1_ACK, v);
@@ -119,11 +129,12 @@ static void sif_setup(struct sif *s)
 {
 	u32 v = readl(s->base + SIF_CTRL0);
 
-	/* Keep stock's deglitch setting; open drain, no clock stretching. */
-	v &= ~(CTRL0_CLK_DIV | CTRL0_ODRAIN_OFF | CTRL0_STRETCH);
-	v |= FIELD_PREP(CTRL0_CLK_DIV, s->div) | CTRL0_EN;
+	/* as the stock module: open drain, clock stretching, deglitch on */
+	v &= ~(CTRL0_CLK_DIV | CTRL0_DEGLITCH | CTRL0_ODRAIN_OFF);
+	v |= FIELD_PREP(CTRL0_CLK_DIV, s->div - 2 * DEGLITCH_LEVEL) |
+	     FIELD_PREP(CTRL0_DEGLITCH, DEGLITCH_LEVEL) |
+	     CTRL0_DEGLITCH_EN | CTRL0_STRETCH | CTRL0_EN;
 	writel(v, s->base + SIF_CTRL0);
-	writel(readl(s->base + SIF_CTRL3) & ~CTRL3_NEW_MODE, s->base + SIF_CTRL3);
 	sif_pinmux(s);
 }
 
@@ -206,6 +217,18 @@ static int sif_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	return ret ? ret : num;
 }
 
+/* Only for the last commands before power-off: interrupts off, nothing else running. */
+static int sif_xfer_atomic(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+	struct sif *s = i2c_get_adapdata(adap);
+	int ret;
+
+	s->atomic = true;
+	ret = sif_xfer(adap, msgs, num);
+	s->atomic = false;
+	return ret;
+}
+
 static u32 sif_func(struct i2c_adapter *adap)
 {
 	return I2C_FUNC_I2C | (I2C_FUNC_SMBUS_EMUL & ~I2C_FUNC_SMBUS_QUICK);
@@ -213,6 +236,7 @@ static u32 sif_func(struct i2c_adapter *adap)
 
 static const struct i2c_algorithm sif_algo = {
 	.xfer = sif_xfer,
+	.xfer_atomic = sif_xfer_atomic,
 	.functionality = sif_func,
 };
 
@@ -239,7 +263,8 @@ static int sif_probe(struct platform_device *pdev)
 	if (of_property_read_u32(dev->of_node, "mediatek,sif-bus", &s->bus) || s->bus > 2)
 		return dev_err_probe(dev, -EINVAL, "mediatek,sif-bus must be 0, 1 or 2\n");
 	of_property_read_u32(dev->of_node, "clock-frequency", &hz);
-	s->div = clamp(DIV_ROUND_UP(SIF_REF_HZ, hz ? hz : 1), 2u, (u32)FIELD_MAX(CTRL0_CLK_DIV));
+	s->div = clamp(DIV_ROUND_UP(SIF_REF_HZ, hz ? hz : 1), 2u * DEGLITCH_LEVEL + 2,
+		       (u32)FIELD_MAX(CTRL0_CLK_DIV));
 
 	dev_info(dev, "bus %u, div %u (%u Hz); as left: ctrl0 %08x ctrl1 %08x pinmux %08x %08x\n",
 		 s->bus, s->div, SIF_REF_HZ / s->div, readl(s->base + SIF_CTRL0),

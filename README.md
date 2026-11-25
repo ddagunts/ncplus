@@ -59,9 +59,10 @@ Tested on one TV (NetCast 4.5, firmware v04.03.10).
 | Desktop | Xfce on Xorg, Firefox ESR, VLC, compressed swap |
 | Network shares | SMB 2.1/3 and NFS (v3, v4) clients. Built in 1.0, not tried on the TV yet |
 | Backlight | on/off |
+| LG remote | an ordinary input device (LG's own remotes only). Power shuts Debian down and puts the TV in standby. Three presses within 30 s force it off |
 | Reboot, watchdog | both return to LG's system. The kernel log survives in RAM |
 
-Not working: hardware video decoding, the LG remote, the tuner, the HDMI inputs and the built-in Wi-Fi
+Not working: hardware video decoding, the tuner, the HDMI inputs and the built-in Wi-Fi
 
 ## Getting started
 

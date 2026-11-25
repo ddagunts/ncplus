@@ -275,9 +275,9 @@ The host is a VM behind NAT (192.168.122.x): it can reach the TV, but the TV can
 - **Backlight = LG MICOM, not MTK.** `MTPMX_PANEL_EnableBacklightPower` (ioctl `0x40040D09`) does nothing visible.
   LG's path in RELEASE: `API_DDM_BackLight_OnOff(on)` -> `DDI_GPIO_SetControl(25 "EnableLCDDisplayPanel")` ->
   MICOM GPIO `0x2102` -> `DDI_MICOM_GPIO_SetOutputPort`: I2C write `{0x36 on | 0x37 off, 0, 0}` to the MICOM.
-  - The MICOM is LG I2C ch 4 = MTK SIF bus 1, address 0x52, clkdiv 380. Captured live with `src/tools/sniff.c`.
+  - The MICOM is LG I2C ch 4 = bus 1 of the SIF ioctl (SIF bus 2 in hardware), address 0x52, 380 kHz. Captured live with `src/tools/sniff.c`.
   - SIF ioctls on `/dev/mtal`: write `0x40200C0B`, read `0x40200C0C`, with struct
-    `{bus, clkdiv, dev, subaddr_len, subaddr, buf*, count, pad}`.
+    `{bus, kHz, dev, subaddr_len, subaddr, buf*, count, pad}`.
   - `src/apps/ncscreen.c`: `on|off`, `off --wake`, and `saver [min]` (idle daemon). Verified on screen.
     Wi-Fi stays up. LG's own Picture->Energy Saving->Screen Off seemed to take the network down.
   - The ack read returns 0xff from our process, but the command works.
@@ -622,22 +622,54 @@ GCC 4.5.1, i686 host binaries). The source is from 2013. The TV's kernel was bui
   For 1:1, LG's `OSD_SC_Scale()` clears the up/down bits and zeroes steps/offsets with src = dst. nckexec does
   this after the stock shutdown when the DTB carries `nckexec,osd-1080`: 1920x1080 ARGB, pitch 7680, buffer at
   the top 8 MB of bank 0 (`0x25800000`, reserved no-map). Confirmed on the panel.
-- **SIF I2C (LG GPL U-Boot `board/mt5398/module/sif_hw_v2.c`, `sif_hw.h`, `LGE_sif_cfg.h`):** MediaTek's
-  SIF buses 0 (system), 1 (tuner) and 2 (second) share master 0 at BIM `+0x21240` = `0xf0029240` (CTRL0, CTRL1
-  `+4`, D0 `+0x10`, D1 `+0x14`, CTRL3 `+0x44`). Only the pad mux tells them apart, and LG sets it before every
-  transfer: CKGEN `0xf000d400` bits 23:22/21:20 and `0xf000d404` bits 1:0 (bus 1 = osda2/oscl2: `d404[1:0]=1`,
-  `d400[21:20]!=1`, `d400[23:22]!=2`). Buses 3 and 4 are the PDWNC masters (`0xf00281c0` / `0xf0028160`). CTRL0:
-  CLK_DIV bits 27:16 (SCL = 27 MHz / div), deglitch 15:8 + enable bit 5, SCL/SDA state bits 3/2, enable bit 1.
-  CTRL1: TRI bit 0 (busy while 1), mode bits 6:4 (1 start, 2 write, 3 stop, 4 read + NACK, 5 read + ACK),
-  PGLEN bits 10:8 (bytes - 1, up to 8), ACK bits 23:16 (one per byte). This is the same command layout as
-  MediaTek's later MT7621 I2C block. Mainline driver: `src/mainline/kernel/drivers/i2c/busses/i2c-mt5398-sif.c`.
-- **Backlight under mainline (written 2026-11-24, on the TV the driver binds, but the one blank attempt, at
-  1267 s, failed: `backlight off failed: -6`, ENXIO after 3 tries, cause unknown):** `lg-micom-bl` (I2C client 0x29 = LG's
-  8-bit 0x52 on SIF bus 1, divider 380) sends `{0x37,0,0}` off / `{0x36,0,0}` on, waits 10 ms and reads the
+- **SIF I2C (LG GPL U-Boot `board/mt5398/module/sif_hw_v2.c`; corrected 2026-11-25 from the TV's own `dtv_driver_adpt.ko`):**
+  MediaTek's SIF buses 0 (system), 1 (tuner) and 2 (second) share master 0 at BIM `+0x21240` = `0xf0029240` (CTRL0,
+  CTRL1 `+4`, D0 `+0x10`, D1 `+0x14`). Only the pad mux tells them apart, and LG sets it before every transfer:
+  CKGEN `0xf000d600` bits 21:20/19:18 and `0xf000d604` bits 1:0. Bus 0 = osda0: `d600[19:18]=1`. Bus 1 = osda2: `d604[1:0]=1`.
+  Bus 2 = osda1: `d600[21:20]=2`. In each case the other two selections must not be set. **The U-Boot source has `+0x400`/`+0x404` and
+  other bits. That is wrong for this TV.** Buses 3 and 4 are the PDWNC masters (`0xf00281c0` / `0xf0028160`). CTRL0:
+  CLK_DIV bits 27:16 (SCL = 27 MHz / div), deglitch 15:8 + enable bit 5, SCL/SDA state bits 3/2, enable bit 1, stretch bit 0.
+  Stock sets deglitch 3, open drain, and stretching on with div reduced by 6. CTRL1: TRI bit 0 (busy while 1), mode bits 6:4
+  (1 start, 2 write, 3 stop, 4 read + NACK, 5 read + ACK), PGLEN bits 10:8 (bytes - 1, up to 8), ACK bits 23:16 (one per
+  byte). Same command layout as MediaTek's later MT7621 I2C block. Driver: `i2c-mt5398-sif.c`.
+  - **The `/dev/mtal` SIF ioctls swap buses 1 and 2** before calling `SIF_X_Read/Write`, and their second word is **kHz**
+    (`div = 27000 / arg`), not a divider. So the MICOM ("bus 1, 380" in the ioctl) is SIF bus **2** at 380 kHz. U-Boot
+    agrees: LG I2C channel 4 = `SIF_BUS_SECOND_I2C`, at 100 kHz.
+- **Backlight under mainline (written 2026-11-24. The one blank attempt on the TV, at 1267 s, failed with ENXIO.
+  Most likely cause, found 2026-11-25: our SIF driver muxed the wrong pads, see above. After the fix off and on work, seen on the panel, 2026-11-25):**
+  `lg-micom-bl` (child of `lg-micom`, I2C client 0x29 = LG's 8-bit 0x52 on SIF bus 2) sends `{0x37,0,0}` off / `{0x36,0,0}` on, waits 10 ms and reads the
   1-byte answer, which is only logged. It is `/sys/class/backlight/micom` (max 1, so `bl_power` 4 = off). The
   mt5398_osd CRTC disable/enable switches it, so DPMS off darkens the panel. Debian's Xorg now sets DPMS
   off after 20 idle minutes (`xset dpms force off` does it at once). On shutdown the driver turns the
   backlight back on.
+- **IR remote (from RELEASE's `MICOM_Task()` at 0x2ec700, driver written 2026-11-25, works on the TV):** the IR receiver
+  is wired to the MICOM, which decodes LG's NEC codes itself. LG polls every 40 ms: one I2C transfer, write `0xc0`, read 3
+  bytes `{event, code, check}`. Events: 2 remote key, 3 remote repeat, 4 local (TV button) key, 5 local repeat, others are
+  timers, CEC, sensors and so on. For keys `code + check` must be 0xff (`0x2eb78c`). Code = NEC command byte of LG's address
+  0x04. The u16 table at 0xb4ab70 maps it to LG's evdev codes (RELEASE then injects "LGE RCU" through uinput). No
+  MICOM interrupt is used. LG treats a key as released after 500 ms without an event. Mainline: `lg-micom` (shared
+  I2C client and lock), `lg-micom-ir` (rc-core scancode driver, input device "LG NetCast remote", keymap `rc-lg-netcast`).
+  `echo 1 > /sys/module/lg_micom_ir/parameters/debug` logs every changed event.
+  Measured: idle reply `ff ff ff`, first repeat 350-400 ms after the press, then at most 100 ms apart, so a key is released
+  `hold_ms` (450) after a press and `repeat_ms` (250) after a repeat. The first build's 350 ms sat on the first repeat and
+  split held keys in two. Seen from the remote: arrows, OK, Back, Vol, Mute, CH, the colour keys, all digits, Power.
+  With 450/250 (checked by hand): a 3.7 s hold is one press and one release, about 0.2 s after the last repeat. Three OK taps 360-410 ms apart are three presses.
+  Keys reach Xorg (XQueryKeymap). Volume/Mute need a listener: the
+  default Xfce panel had no pulseaudio plugin, now added by `src/mainline/debian/panel-volume.sh` (new users only).
+  With the plugin, Vol and Mute from the remote work.
+  As stock left the SIF: ctrl0 `0041036f` (div 65, deglitch 3, stretch), d600 `1022f0aa` ([21:20] = 2): the analysis was right.
+  Limits: only LG remotes (other codes never leave the MICOM), no Magic Remote pointer (that is a radio link).
+  On Power the MICOM starts a timer and
+  switches the TV off when it runs out (power-off reason `KEYTIMEOUT` in RELEASE). `DDI_MICOM_CancelPowerOff` (write `0x52`) stops it, LG
+  sends it before its own "really switch off?" dialogs.
+  - **Power-off (works on the TV 2026-11-25):** `lg-micom-ir` sends `0x52` on every Power event and reports KEY_POWER, logind shuts down, and
+    `lg-micom` ends the shutdown with `{0x25, 0x00, 0x10}` = LG's cold standby command, reason "REMOTE KEY" (end of
+    `API_DDM_POWER_ShutdownSystem`, 0x35d75c, reasons at 0xb77dc0). Not done from LG's sequence: eMMC power-off notification, HDMI switch, audio.
+    Tested: with logind inhibited the TV stayed on (> 91 s). Without, sshd closed its connection, the TV went off, and the next boot's ext4 needed no journal recovery. If it is still powered 10 s
+    after the command, the kernel restarts (LG's system). The third Power press within 30 s is not cancelled (not tested).
+  - **Other remotes:** an Apple remote gives no MICOM event at all. The SoC's own receiver (PDWNC IRRX, `0xf0028200`, left running in
+    NEC mode by stock: IRCFGH `6120`, IRCFGL `546ea`) latched nothing in 75 s from either remote while six LG keys came through
+    the MICOM, so the sensor is most likely not wired to it. (Bit 0 of IRCFGH, the enable, always reads 0.)
 - **TrustZone:** `CC_TRUSTZONE_SUPPORT` keeps the last 16 MB of the RAM hole for the secure world:
   `0x3f000000`–`0x3fffffff`, which is why reads there bus-error from Linux.
 - **Secondary CPU boot:** the entry point's physical address goes in BIM `+0x188` (TIMER1_HLMT), magic

@@ -12,11 +12,11 @@
  * How LG does it (reverse-engineered from RELEASE, confirmed with a live ptrace capture):
  *   API_DDM_BackLight_OnOff(on) -> DDI_GPIO_SetControl(25 "EnableLCDDisplayPanel")
  *   -> MICOM GPIO 0x2102 -> DDI_MICOM_GPIO_SetOutputPort: I2C write {0x36 on | 0x37 off, 0, 0}
- *      to the MICOM (LG ch 4 = MediaTek SIF bus 1, address 0x52, clkdiv 380), wait 10 ms,
+ *      to the MICOM (LG ch 4 = bus 1 of the ioctl, which is SIF bus 2, address 0x52, 380 kHz), wait 10 ms,
  *      read a 1-byte ack (off requires ack 0), up to 3 tries.
  *   SIF transfers are MTAL ioctls on /dev/mtal:
  *      MTSIF_WriteMultipleSubAddr 0x40200C0B / MTSIF_ReadMultipleSubAddr 0x40200C0C with
- *      struct { bus, clkdiv, devaddr, subaddr_len, subaddr, buf*, count, pad } (8 x u32).
+ *      struct { bus, clkdiv, devaddr, subaddr_len, subaddr, buf*, count, pad } (8 x u32). clkdiv is kHz.
  * RAM-only effect: nothing is saved; LG may turn the backlight back on itself (e.g. on input change).
  */
 #include <errno.h>

@@ -100,6 +100,8 @@ mmdebstrap --mode=unshare --variant=minbase --architectures=armhf,armel \
 	--customize-hook="upload '$OUT/authorized_keys' /root/.ssh/authorized_keys" \
 	--customize-hook='chown -R root:root "$1/root/.ssh" && chmod 700 "$1/root/.ssh" && chmod 600 "$1/root/.ssh/authorized_keys"' \
 	--customize-hook="cd \"\$1\" && chown root:root . $OVL_PATHS && chmod go-w . $OVL_PATHS" \
+	--customize-hook="upload '$TOP/src/mainline/debian/panel-volume.sh' /tmp/panel-volume.sh" \
+	--customize-hook='sh "$1/tmp/panel-volume.sh" "$1/etc/xdg/xfce4/panel/default.xml" && rm "$1/tmp/panel-volume.sh"' \
 	--customize-hook='chmod 440 "$1/etc/sudoers.d/tv"' \
 	--customize-hook='chroot "$1" useradd -m -u 1000 -U -G video,input,render,sudo -s /bin/bash tv && chroot "$1" passwd -dq tv' \
 	--customize-hook='rm -f "$1"/etc/ssh/ssh_host_*' \
