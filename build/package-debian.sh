@@ -104,7 +104,8 @@ mainline/debian.img
                  Debian 13 "trixie" armhf, unmodified Debian packages (each under its own
                  licence: /usr/share/doc/*/copyright in the image; list and versions in
                  debian-packages.txt) and this project's configuration
-                 (src/mainline/debian/overlay/); built by third_party/build-debian.sh.
+                 (src/mainline/debian/overlay/, and panel-volume.sh beside it, which adds the volume
+                 control to /etc/xdg/xfce4/panel/default.xml); built by third_party/build-debian.sh.
 mainline/pvr/pvrsrvkm.ko
                  The PowerVR SGX services kernel module: Imagination Technologies' DDK 1.9 as
                  released by Texas Instruments (git.ti.com/graphics/omap5-sgx-ddk-linux, tag
@@ -179,20 +180,23 @@ Using Debian
          sudo mount -t cifs //SERVER/SHARE /mnt -o username=NAME,uid=tv,gid=tv
          sudo mount -t nfs SERVER:/EXPORT /mnt
   - Text console only, no desktop: create an empty file netcast/mainline/console on the stick.
+  - LG's own remote works (not other brands'): arrows, OK = Enter, Back = Esc, Vol, Mute, CH +/-
+    = Page Up/Down, colours = F1-F4. Power shuts Debian down and puts the TV in standby. Three
+    presses within 30 s force it off (not tested).
   - Back to LG's system: "sudo reboot" (the TV resets and starts LG's system normally, ~1 min).
     If Debian hangs, the hardware watchdog does the same within ~2.5 min.
 
 What works
   Both CPU cores, 1920x1080 at the panel's own 50 or 60 Hz, sound through the TV speakers
   (Master volume in the desktop's mixer), USB storage, Ethernet, keyboards and mice, Bluetooth
-  keyboards with a USB dongle.
+  keyboards with a USB dongle, the LG remote, the backlight.
   50 or 60 Hz: Linux keeps the rate the panel has when it starts. fire.sh sets 60 Hz first; put
   NETCAST_HZ=50 (or NETCAST_HZ=keep: whatever LG's system is using) in front of the command to
   choose otherwise: NETCAST_HZ=50 nohup sh ... fire.sh go ...
 
 Not working
-  GPU acceleration of the desktop (Xorg draws with the CPU), the TV's built-in Wi-Fi, the LG
-  remote, TV tuner and HDMI inputs, hardware video decoding.
+  GPU acceleration of the desktop (Xorg draws with the CPU), the TV's built-in Wi-Fi, TV tuner
+  and HDMI inputs, hardware video decoding.
 
 GPU test (experimental, for developers)
   The TV's PowerVR SGX544 runs under Debian with LG's own OpenGL ES libraries, which fire.sh
