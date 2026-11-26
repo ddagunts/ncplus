@@ -194,8 +194,8 @@ What works
   on the TV's video plane. Parole (Multimedia menu) plays files that way, with sound; the
   desktop disappears while a video plays and comes back when it stops
   (keys: Space pause, Left/Right and CH +/- seek, Ctrl+Q quits Parole). Other codecs (MPEG-2,
-  MPEG-4, HEVC, VP9, ...) are decoded by the CPU: fine for SD, not for HD. 1080p is scaled
-  down to 720p (for now).
+  MPEG-4, HEVC, VP9, ...) are decoded by the CPU: fine for SD, not for HD. Up to 720p plays
+  smoothly; 1080p is scaled down to 720p and drops most of its frames (for now).
   50 or 60 Hz: Linux keeps the rate the panel has when it starts. fire.sh sets 60 Hz first; put
   NETCAST_HZ=50 (or NETCAST_HZ=keep: whatever LG's system is using) in front of the command to
   choose otherwise: NETCAST_HZ=50 nohup sh ... fire.sh go ...

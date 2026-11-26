@@ -57,12 +57,13 @@ Tested on one TV (NetCast 4.5, firmware v04.03.10).
 | Bluetooth | with a USB dongle. An LE keyboard works |
 | GPU | OpenGL ES 2, off-screen and full screen. The desktop is drawn by the CPU |
 | Desktop | Xfce on Xorg, Firefox ESR, VLC, compressed swap |
+| Video | H.264 decoded by the TV's hardware and shown full screen on its video plane: Parole plays files that way, with sound. Smooth at 720p; 1080p is scaled to 720p and drops most of its frames for now. Other codecs on the CPU |
 | Network shares | SMB 2.1/3 and NFS (v3, v4) clients. Built in 1.0, not tried on the TV yet |
 | Backlight | on/off |
 | LG remote | an ordinary input device (LG's own remotes only). Power shuts Debian down and puts the TV in standby. Three presses within 30 s force it off |
 | Reboot, watchdog | both return to LG's system. The kernel log survives in RAM |
 
-Not working: hardware video decoding, the tuner, the HDMI inputs and the built-in Wi-Fi
+Not working: hardware decoding of codecs other than H.264, smooth 1080p video, the tuner, the HDMI inputs and the built-in Wi-Fi
 
 ## Getting started
 
