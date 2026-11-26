@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_MT5398_VDEC
+	tristate "MediaTek MT5398 H.264 decoder (LG NetCast TVs)"
+	depends on V4L_MEM2MEM_DRIVERS
+	depends on VIDEO_DEV && OF && HAS_DMA
+	select MEDIA_CONTROLLER
+	select VIDEOBUF2_DMA_CONTIG
+	select VIDEOBUF2_VMALLOC
+	select V4L2_MEM2MEM_DEV
+	select V4L2_H264
+	help
+	  Stateless (frame-based) V4L2 H.264 decoder for the MT5398's video
+	  decoder, up to 1920x1088, progressive only. Needs a CMA pool in
+	  DRAM bank 0 (memory-region) and adds the decoder to LG's DRAM
+	  write protection while it is bound.

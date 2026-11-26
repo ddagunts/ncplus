@@ -8,7 +8,8 @@
  * the kernel touches the A9 private peripherals, OSD plane 3 (simplefb, then the mt5398_osd
  * KMS driver), the BIM interrupt gate, the four MUSB USB host ports (clocks and VBUS as the
  * stock kernel left them), one SIF I2C master for the MICOM (backlight, IR remote) and, only on
- * request, the SGX544's ID and reset registers.
+ * request, the SGX544's ID and reset registers, and the H.264 decoder (plus one CKGEN word and
+ * MID region 0's agent mask for it).
  *
  * The panel is 1920x1080; stock shows OSD plane 3 as a 1280x720 bitmap upscaled 1.5x by the
  * OSD scaler. "nckexec,osd-1080" below makes nckexec switch plane 3 to a native 1920x1080
@@ -102,6 +103,19 @@
 			size = <0x04000000>;			/* 64 MB: 7 x 1080p ARGB */
 			alloc-ranges = <0x10000000 0x10000000>;
 			alignment = <0x00100000>;
+		};
+
+		/*
+		 * Video decoder buffers (CMA, reusable): bitstream, pictures, motion vectors. The
+		 * decoder is only known to reach bank 0. 96 MB = about 12 1080p pictures with
+		 * their NV12 copies.
+		 */
+		vdec_pool: vdec-pool {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x06000000>;
+			alloc-ranges = <0x02000000 0x0e000000>;
+			alignment = <0x00400000>;
 		};
 
 		/*
@@ -348,6 +362,23 @@
 			reg-names = "sgx", "ckgen";
 			interrupt-parent = <&bim>;
 			interrupts = <0 53 4>;	/* MISC bank line 21 */
+		};
+
+		/*
+		 * H.264 decoder (mt5398-vdec): VLD (its TOP part at +0x800), VSYS, MC, PP, AVLD,
+		 * AMV; the CKGEN word is its clock select (LG writes 4); "mid" is region 0 of the
+		 * DRAM controller's write protection, which the driver opens for the decoder's two
+		 * agents. Interrupt = BIM line 24 (LG's vector 24).
+		 */
+		video-codec@f0002000 {
+			compatible = "mediatek,mt5398-vdec";
+			reg = <0xf0002000 0x1000>, <0xf0003000 0x100>, <0xf000a000 0x1000>,
+			      <0xf002f000 0x100>, <0xf0030000 0x1000>, <0xf0031000 0x1000>,
+			      <0xf000d3f4 0x4>, <0xf0007400 0x10>;
+			reg-names = "vld", "vsys", "mc", "pp", "avld", "amv", "ckgen", "mid";
+			interrupt-parent = <&bim>;
+			interrupts = <0 24 4>;
+			memory-region = <&vdec_pool>;
 		};
 
 		gic: interrupt-controller@f2003000 {
