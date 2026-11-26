@@ -20,9 +20,11 @@
  * triggers the panel stays black.
  *
  * Formats on the OUTPUT queue (multi-planar API, one plane):
- *   NV12   any size up to 1280x720 (even); the CPU tiles each frame into one of the driver's
- *          scanout buffers, centred on black, and the buffer is returned at once. vmalloc
- *          buffers, so DMABUFs from mt5398-vdec's NV12 CAPTURE queue import with no copy.
+ *   NV12   any size up to 1920x1088 (even); the CPU tiles each frame into one of the driver's
+ *          scanout buffers, centred on black, and the buffer is returned at once; pictures
+ *          larger than 1280x720 are scaled down to fit while tiling (nearest neighbour).
+ *          vmalloc buffers, so DMABUFs from mt5398-vdec's NV12 CAPTURE queue import with no
+ *          copy.
  *   MT64   the tiled layout, 1280x720 only; the buffer itself is scanned out (dma-contig, from
  *          the DT's memory-region) and returned when the next one is on screen.
  * Flips happen on B2R's vsync interrupt (+0x30c bit 4); B2R runs 720p at 30 Hz (LG's timing for
@@ -69,6 +71,8 @@
 #define VP_H		720
 #define VP_LUMA		(VP_W * ALIGN(VP_H, 32))		/* 64x32 tiles */
 #define VP_SIZE		(VP_LUMA * 3 / 2)
+#define NV12_MAX_W	1920	/* larger NV12 is scaled down by the CPU while tiling */
+#define NV12_MAX_H	1088
 #define NSCAN		4	/* NV12: shown, the one before it (still latching), pending, writing */
 
 /* B2R, HD channel at +0x000 (SD at +0x100 is left off) */
@@ -154,6 +158,10 @@ struct vplane {
 
 	struct vplane_scan scan[NSCAN];
 	struct work_struct tile_work;
+	/* NV12: where the picture goes (place_picture), the scaled row and its source columns */
+	u32 dw, dh, ox, oy;
+	u16 xmap[VP_W];
+	u8 line[VP_W];
 
 	/* Under slock. */
 	spinlock_t slock;
@@ -209,7 +217,7 @@ static void b2r_show(struct vplane *vp, dma_addr_t luma)
 	writel(luma + VP_LUMA, vp->b2r + B2R_RV_C);
 }
 
-/* B2R clock and 720p30 mode, the path table, the import triggers; B2R shows @luma. */
+/* B2R clock and 720p30 mode, the path table, the import triggers; B2R shows @luma. Sleeps. */
 static void vplane_hw_setup(struct vplane *vp, dma_addr_t luma)
 {
 	void __iomem *ck = vp->win[W_CKGEN].va;
@@ -228,8 +236,15 @@ static void vplane_hw_setup(struct vplane *vp, dma_addr_t luma)
 	writel(0x15, vp->b2r + B2R_ENABLE);
 	writel(readl(vp->b2r + B2R_UPDATE) | 1, vp->b2r + B2R_UPDATE);
 
+	/*
+	 * The triggers latch what the path measures of its input, so B2R must have been running
+	 * its new mode for a few frames first: fired right after the writes, they latch the old
+	 * input's sizes and the panel stays black (seen on a cold boot).
+	 */
+	msleep(100);
 	for (i = 0; i < ARRAY_SIZE(vplane_path_720p); i++)
 		writel(vplane_path_720p[i][1], path_reg(vp, vplane_path_720p[i][0]));
+	msleep(50);
 
 	path_set_bits(vp, PDS_IMPORT, BIT(4), 0);
 	path_set_bits(vp, REGEN_IMPORT, BIT(25), 0);
@@ -249,32 +264,77 @@ static void fill_black(void *dst)
 	memset(dst + VP_LUMA, 0x80, VP_LUMA / 2);
 }
 
+/* One row of a plane into the tiles (th lines, tb bytes per tile) at line dy, column ox. */
+static void put_row(u8 *plane, u32 th, u32 tb, u32 dy, u32 ox, const u8 *row, u32 len)
+{
+	u8 *d = plane + (dy / th) * (VP_W * th) + (dy % th) * 64 + (ox / 64) * tb;
+	u32 x;
+
+	for (x = 0; x < len; x += 64, d += tb)
+		memcpy(d, row + x, min(64u, len - x));
+}
+
 /*
  * One NV12 frame (w x h, bytes per line bpl, chroma right after the luma) into a scanout
- * buffer at (ox, oy): ox a multiple of 64, oy even. Only the picture's area is written.
+ * buffer as a dw x dh picture at (ox, oy): ox a multiple of 64, oy and dh even. Larger
+ * pictures are scaled down (nearest neighbour, columns from xmap). Only the picture's
+ * area is written.
  */
-static void tile_nv12(void *dst, const u8 *src, u32 bpl, u32 w, u32 h, u32 ox, u32 oy)
+static void tile_nv12(struct vplane *vp, void *dst, const u8 *src)
 {
+	const struct v4l2_pix_format_mplane *f = &vp->fmt;
+	u32 bpl = f->plane_fmt[0].bytesperline, w = f->width, h = f->height;
+	u32 dw = vp->dw, dh = vp->dh, ox = vp->ox, oy = vp->oy, x, y;
 	const u8 *csrc = src + bpl * h;
-	u8 *cdst = dst + VP_LUMA;
-	u32 x, y;
+	bool scale = dw != w || dh != h;
+	u8 *line = vp->line;
 
-	for (y = 0; y < h; y++) {
-		u32 dy = oy + y;
-		u8 *row = dst + (dy / 32) * (VP_W * 32) + (dy % 32) * 64 + (ox / 64) * 2048;
-		const u8 *s = src + y * bpl;
+	for (y = 0; y < dh; y++) {
+		const u8 *s = src + (scale ? y * h / dh : y) * bpl;
 
-		for (x = 0; x < w; x += 64, row += 2048)
-			memcpy(row, s + x, min(64u, w - x));
+		if (scale) {
+			for (x = 0; x < dw; x++)
+				line[x] = s[vp->xmap[x]];
+			s = line;
+		}
+		put_row(dst, 32, 2048, oy + y, ox, s, dw);
 	}
-	for (y = 0; y < h / 2; y++) {
-		u32 dy = oy / 2 + y;
-		u8 *row = cdst + (dy / 16) * (VP_W * 16) + (dy % 16) * 64 + (ox / 64) * 1024;
-		const u8 *s = csrc + y * bpl;
+	for (y = 0; y < dh / 2; y++) {
+		const u8 *s = csrc + (scale ? y * (h / 2) / (dh / 2) : y) * bpl;
 
-		for (x = 0; x < w; x += 64, row += 1024)
-			memcpy(row, s + x, min(64u, w - x));
+		if (scale) {
+			for (x = 0; x < dw; x += 2) {
+				u32 sx = vp->xmap[x] & ~1u;
+
+				line[x] = s[sx];
+				line[x + 1] = s[sx + 1];
+			}
+			s = line;
+		}
+		put_row(dst + VP_LUMA, 16, 1024, oy / 2 + y, ox, s, dw);
 	}
+}
+
+/* Where the picture goes: as it is if it fits, else scaled down to fit (aspect kept). */
+static void place_picture(struct vplane *vp)
+{
+	u32 w = vp->fmt.width, h = vp->fmt.height, x;
+
+	vp->dw = w;
+	vp->dh = h;
+	if (w > VP_W || h > VP_H) {
+		if ((u64)w * VP_H > (u64)h * VP_W) {
+			vp->dw = VP_W;
+			vp->dh = min_t(u32, VP_H, ALIGN(DIV_ROUND_CLOSEST(h * VP_W, w), 2));
+		} else {
+			vp->dh = VP_H;
+			vp->dw = min_t(u32, VP_W, ALIGN(DIV_ROUND_CLOSEST(w * VP_H, h), 2));
+		}
+	}
+	for (x = 0; x < vp->dw; x++)
+		vp->xmap[x] = x * w / vp->dw;
+	vp->ox = ((VP_W - vp->dw) / 2) & ~63u;
+	vp->oy = ((VP_H - vp->dh) / 2) & ~1u;
 }
 
 /* ---- flips ---- */
@@ -308,8 +368,6 @@ static int scan_free(struct vplane *vp)
 static void tile_work(struct work_struct *w)
 {
 	struct vplane *vp = container_of(w, struct vplane, tile_work);
-	const struct v4l2_pix_format_mplane *f = &vp->fmt;
-	u32 ox = ((VP_W - f->width) / 2) & ~63u, oy = ((VP_H - f->height) / 2) & ~1u;
 	struct vplane_buf *buf;
 	unsigned long flags;
 	ktime_t t0;
@@ -328,8 +386,7 @@ static void tile_work(struct work_struct *w)
 		spin_unlock_irqrestore(&vp->slock, flags);
 
 		t0 = ktime_get();
-		tile_nv12(vp->scan[i].va, vb2_plane_vaddr(&buf->vb.vb2_buf, 0),
-			  f->plane_fmt[0].bytesperline, f->width, f->height, ox, oy);
+		tile_nv12(vp, vp->scan[i].va, vb2_plane_vaddr(&buf->vb.vb2_buf, 0));
 		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 
 		spin_lock_irqsave(&vp->slock, flags);
@@ -434,6 +491,7 @@ static int vp_start_streaming(struct vb2_queue *q, unsigned int count)
 
 	for (i = 0; i < NSCAN; i++)
 		fill_black(vp->scan[i].va);
+	place_picture(vp);
 	if (!vp->hw_ready) {
 		vplane_hw_setup(vp, vp->scan[0].dma);
 		vp->hw_ready = true;
@@ -510,8 +568,8 @@ static void fill_fmt(struct v4l2_pix_format_mplane *f, u32 fourcc, u32 w, u32 h)
 		f->plane_fmt[0].bytesperline = VP_W;
 		f->plane_fmt[0].sizeimage = VP_SIZE;
 	} else {
-		f->width = clamp_t(u32, ALIGN(w, 2), 64, VP_W);
-		f->height = clamp_t(u32, ALIGN(h, 2), 64, VP_H);
+		f->width = clamp_t(u32, ALIGN(w, 2), 64, NV12_MAX_W);
+		f->height = clamp_t(u32, ALIGN(h, 2), 64, NV12_MAX_H);
 		f->plane_fmt[0].bytesperline = f->width;
 		f->plane_fmt[0].sizeimage = f->width * f->height * 3 / 2;
 	}
@@ -582,10 +640,10 @@ static int vp_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsize
 		return -EINVAL;
 	fs->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 	fs->stepwise.min_width = 64;
-	fs->stepwise.max_width = VP_W;
+	fs->stepwise.max_width = NV12_MAX_W;
 	fs->stepwise.step_width = 2;
 	fs->stepwise.min_height = 64;
-	fs->stepwise.max_height = VP_H;
+	fs->stepwise.max_height = NV12_MAX_H;
 	fs->stepwise.step_height = 2;
 	return 0;
 }

@@ -190,13 +190,21 @@ What works
   Both CPU cores, 1920x1080 at the panel's own 50 or 60 Hz, sound through the TV speakers
   (Master volume in the desktop's mixer), USB storage, Ethernet, keyboards and mice, Bluetooth
   keyboards with a USB dongle, the LG remote, the backlight.
+  Video: H.264 (up to 1080p, progressive) is decoded by the TV's hardware and shown full screen
+  on the TV's video plane. Parole (Multimedia menu) plays files that way (no sound yet, see
+  "Not working"); the desktop disappears while a video plays and comes back when it stops
+  (keys: Space pause, Left/Right and CH +/- seek, Ctrl+Q quits Parole). Other codecs (MPEG-2,
+  MPEG-4, HEVC, VP9, ...) are decoded by the CPU: fine for SD, not for HD. 1080p is scaled
+  down to 720p (for now).
   50 or 60 Hz: Linux keeps the rate the panel has when it starts. fire.sh sets 60 Hz first; put
   NETCAST_HZ=50 (or NETCAST_HZ=keep: whatever LG's system is using) in front of the command to
   choose otherwise: NETCAST_HZ=50 nohup sh ... fire.sh go ...
 
 Not working
   GPU acceleration of the desktop (Xorg draws with the CPU), the TV's built-in Wi-Fi, TV tuner
-  and HDMI inputs, hardware video decoding.
+  and HDMI inputs, hardware decoding of codecs other than H.264, interlaced H.264.
+  Sound: the TV speakers stayed silent on the latest test boots, even for a plain test tone
+  (earlier builds played sound; cause not found yet, possibly the video plane's setup).
 
 GPU test (experimental, for developers)
   The TV's PowerVR SGX544 runs under Debian with LG's own OpenGL ES libraries, which fire.sh

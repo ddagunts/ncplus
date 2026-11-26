@@ -19,6 +19,8 @@
 #
 # Desktop: Xfce on Xorg (modesetting on the mt5398_osd KMS driver, CPU rendering), lightdm
 # logs user tv (no password, passwordless sudo) in on vt7. Firefox ESR, swap on zram.
+# Video: Parole/GStreamer decode H.264 in hardware (mt5398-vdec) and show it full screen on
+# the video plane (mt5398-vplane) through the netcastsink plugin (src/mainline/gst).
 #
 # Env: DEBIAN_SUITE (trixie), DEBIAN_MIRROR, IMG_MB (3072; the stick is FAT, so < 4096).
 # Builds in $TMPDIR (default /tmp), which needs about the root's size (~2 GB) free, and so
@@ -63,6 +65,13 @@ PKGS=(
 	# ALSA front ends, so Firefox, VLC and plain ALSA programs all reach the card
 	pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils
 	xfce4-pulseaudio-plugin pavucontrol
+	# Video: GStreamer with the hardware H.264 decoder (v4l2codecs in plugins-bad, on
+	# mt5398-vdec) and the video plane (v4l2sink in plugins-good, on mt5398-vplane, through
+	# our netcastsink plugin, see below); libav for what the hardware doesn't decode
+	# (HEVC, VP9, ...: software, SD at best). Parole plays through it, audio via PipeWire.
+	gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+	gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-pulseaudio gstreamer1.0-x
+	parole
 	# Bluetooth keyboards: the kernel's modules (bluetooth, btusb, hidp, uhid) go to
 	# /usr/lib/modules from build-mainline.sh's out/modules; blueman = pairing from the panel
 	bluez blueman
@@ -74,6 +83,10 @@ PKGS=(
 	# network shares (kernel modules cifs, nfs)
 	cifs-utils nfs-common
 )
+
+# the video plane's GStreamer sink (src/mainline/gst/build.sh)
+GSTSINK=$OUT/libgstnetcastsink.so
+[ -f "$GSTSINK" ] || { echo "missing $GSTSINK: run src/mainline/gst/build.sh first" >&2; exit 1; }
 
 # loadable kernel modules, from third_party/build-mainline.sh (it runs modules_install)
 MODS=$OUT/modules/lib/modules
@@ -96,6 +109,8 @@ mmdebstrap --mode=unshare --variant=minbase --architectures=armhf,armel \
 	--customize-hook='mkdir -p "$1/usr/lib/modules"' \
 	--customize-hook="sync-in '$MODS' /usr/lib/modules" \
 	--customize-hook='chown -R root:root "$1/usr/lib/modules" && chmod -R go-w "$1/usr/lib/modules"' \
+	--customize-hook="upload '$GSTSINK' /usr/lib/arm-linux-gnueabihf/gstreamer-1.0/libgstnetcastsink.so" \
+	--customize-hook='chmod 644 "$1/usr/lib/arm-linux-gnueabihf/gstreamer-1.0/libgstnetcastsink.so"' \
 	--customize-hook='mkdir -p "$1/root/.ssh"' \
 	--customize-hook="upload '$OUT/authorized_keys' /root/.ssh/authorized_keys" \
 	--customize-hook='chown -R root:root "$1/root/.ssh" && chmod 700 "$1/root/.ssh" && chmod 600 "$1/root/.ssh/authorized_keys"' \

@@ -1,0 +1,6 @@
+# GStreamer on the TV (sourced by Xsession; /etc/profile.d has the same).
+# H.264 goes to the hardware decoder (mt5398-vdec, v4l2slh264dec, rank primary + 1) before the
+# software one (avdec_h264, primary); raised further so nothing ranked in between wins.
+# Video output: the netcastsink plugin (mt5398-vplane, full screen) is what autovideosink and
+# Parole's default "autoimagesink" setting get.
+export GST_PLUGIN_FEATURE_RANK=v4l2slh264dec:512
