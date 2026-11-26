@@ -24,6 +24,11 @@
  * DPMS: disabling the CRTC also switches the panel backlight off through the DT's
  * "backlight" device (the MICOM, lg-micom-bl), so screen blanking darkens the panel.
  *
+ * The video plane (B2R, mt5398-vplane) is mixed under this plane, and the desktop is opaque:
+ * while a video is shown full screen that driver calls mt5398_osd_video_fullscreen(true),
+ * which keeps plane 3 off until it is called with false. The plane state KMS wants is kept
+ * and put back then.
+ *
  * No OSD vsync interrupt is known, so vblank is an hrtimer, locked to the raster: the
  * panel's timing generator (PSC, optional regs "raster") has a live line counter, so each tick
  * re-arms itself for the wanted line and follows the panel's real rate. LG's software leaves the
@@ -68,6 +73,8 @@
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vblank.h>
+
+#include <linux/soc/mediatek/mt5398-osd.h>
 
 #define DRIVER_NAME	"mt5398-osd"
 
@@ -152,6 +159,10 @@ struct mt5398_osd {
 	u32 latch_w1;
 	bool vblank_on;			/* under vblank_timer's own lock-free protocol */
 
+	/* plane 3 enable: what KMS wants, and whether a full-screen video hides it */
+	spinlock_t plane_lock;
+	bool plane_want, video_full;
+
 	/* Under drm.event_lock. */
 	struct drm_pending_vblank_event *event;
 	u32 flip_w1;
@@ -189,9 +200,11 @@ static void osd_update(struct mt5398_osd *osd)
 	writel(readl(osd->regs + OSD_UPDATE) | OSD_UPDATE_OSD1, osd->regs + OSD_UPDATE);
 }
 
-static void osd_plane_enable(struct mt5398_osd *osd, bool on)
+/* Under plane_lock. */
+static void osd_plane_apply(struct mt5398_osd *osd)
 {
 	void __iomem *ctrl = osd->regs + OSD_PLA3 + OSD_PLA_CTRL;
+	bool on = osd->plane_want && !osd->video_full;
 	u32 v = readl(ctrl), nv = on ? v | OSD_PLA_CTRL_EN : v & ~OSD_PLA_CTRL_EN;
 
 	if (nv == v)
@@ -199,6 +212,44 @@ static void osd_plane_enable(struct mt5398_osd *osd, bool on)
 	writel(nv, ctrl);
 	osd_update(osd);
 }
+
+static void osd_plane_enable(struct mt5398_osd *osd, bool on)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&osd->plane_lock, flags);
+	osd->plane_want = on;
+	osd_plane_apply(osd);
+	spin_unlock_irqrestore(&osd->plane_lock, flags);
+}
+
+/* The bound OSD, for mt5398_osd_video_fullscreen(); under osd_instance_lock. */
+static DEFINE_SPINLOCK(osd_instance_lock);
+static struct mt5398_osd *osd_instance;
+
+/**
+ * mt5398_osd_video_fullscreen - hide the OSD plane over a full-screen video
+ * @on: true to keep plane 3 off, false to give it back to KMS
+ *
+ * Returns -ENODEV if no OSD is bound.
+ */
+int mt5398_osd_video_fullscreen(bool on)
+{
+	unsigned long flags;
+	int ret = -ENODEV;
+
+	spin_lock_irqsave(&osd_instance_lock, flags);
+	if (osd_instance) {
+		spin_lock(&osd_instance->plane_lock);
+		osd_instance->video_full = on;
+		osd_plane_apply(osd_instance);
+		spin_unlock(&osd_instance->plane_lock);
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&osd_instance_lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt5398_osd_video_fullscreen);
 
 /*
  * Point the header at a new bitmap. Words that don't change aren't written, so a flip
@@ -768,6 +819,8 @@ static int osd_probe(struct platform_device *pdev)
 	osd->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(osd->regs))
 		return PTR_ERR(osd->regs);
+	spin_lock_init(&osd->plane_lock);
+	osd->plane_want = readl(osd->regs + OSD_PLA3 + OSD_PLA_CTRL) & OSD_PLA_CTRL_EN;
 
 	ret = osd_hw_init(osd, dev);
 	if (ret)
@@ -807,12 +860,20 @@ static int osd_probe(struct platform_device *pdev)
 
 	/* ARGB8888 for the console: fbcon's palette is then opaque, as it was on simplefb. */
 	drm_client_setup_with_fourcc(&osd->drm, DRM_FORMAT_ARGB8888);
+
+	spin_lock_irq(&osd_instance_lock);
+	osd_instance = osd;
+	spin_unlock_irq(&osd_instance_lock);
 	return 0;
 }
 
 static void osd_remove(struct platform_device *pdev)
 {
 	struct mt5398_osd *osd = platform_get_drvdata(pdev);
+
+	spin_lock_irq(&osd_instance_lock);
+	osd_instance = NULL;
+	spin_unlock_irq(&osd_instance_lock);
 
 	drm_dev_unplug(&osd->drm);
 	drm_atomic_helper_shutdown(&osd->drm);

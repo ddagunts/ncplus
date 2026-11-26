@@ -381,6 +381,22 @@
 			memory-region = <&vdec_pool>;
 		};
 
+		/*
+		 * Video plane: B2R feeds the main video path (PDS/regen, deinterlacer, scaler,
+		 * MJC, output stage), mixed under the OSD. Only "b2r" is the driver's own; the
+		 * other windows are shared (CKGEN, the OSD's raster and route words) and mapped
+		 * without requesting them. Scanout buffers from the decoder's pool.
+		 */
+		video-plane@f0026000 {
+			compatible = "mediatek,mt5398-vplane";
+			reg = <0xf0026000 0x1000>, <0xf000d000 0x1000>, <0xf0022000 0x4000>,
+			      <0xf0027000 0x1000>, <0xf005e000 0x1000>, <0xf0036000 0x1000>;
+			reg-names = "b2r", "ckgen", "path", "post", "timing", "mjc";
+			interrupt-parent = <&bim>;
+			interrupts = <0 21 4>;	/* B2R vsync */
+			memory-region = <&vdec_pool>;
+		};
+
 		gic: interrupt-controller@f2003000 {
 			compatible = "arm,cortex-a9-gic";
 			#interrupt-cells = <3>;

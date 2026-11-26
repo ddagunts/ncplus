@@ -13,3 +13,17 @@ config VIDEO_MT5398_VDEC
 	  decoder, up to 1920x1088, progressive only. Needs a CMA pool in
 	  DRAM bank 0 (memory-region) and adds the decoder to LG's DRAM
 	  write protection while it is bound.
+
+config VIDEO_MT5398_VPLANE
+	tristate "MediaTek MT5398 video plane (LG NetCast TVs)"
+	depends on VIDEO_DEV && OF && HAS_DMA
+	depends on DRM_MT5398_OSD || !DRM_MT5398_OSD
+	select VIDEOBUF2_DMA_CONTIG
+	select VIDEOBUF2_VMALLOC
+	help
+	  V4L2 video output device for the MT5398's video plane (B2R and
+	  the main video path, mixed under the OSD): NV12 up to 1280x720
+	  (tiled by the CPU, DMABUFs from mt5398-vdec imported without a
+	  copy) or the decoder's own tiled format. Sets the path up for a
+	  720p source itself and switches the desktop's OSD plane off while
+	  a video streams.
