@@ -53,8 +53,11 @@ cp "$TOP/src/out/run-app.sh" "$P/tools/"
 mkdir -p "$P/mainline/pvr"
 for f in $PVR; do cp "$MO/sgx/$f" "$P/mainline/pvr/"; done
 "$STRIP" "$P/mainline/pvr/sgxgltest" "$P/mainline/pvr/libpvrEWS_NullWSEGL.so"
-# examples only: a user's own authorized_keys, wifi.conf and rc.local survive unzipping a newer package
-cp "$TOP"/src/mainline/stick/*.example "$P/mainline/"
+# The user's own authorized_keys, wifi.conf and rc.local live at the root of the stick, outside
+# the netcast folder, so a newer package can replace that folder whole. Only the examples are
+# in the zip, at its root (Debian still reads netcast/mainline/{authorized_keys,wifi.conf},
+# where 1.1 kept them, when the root has none).
+cp "$TOP"/src/mainline/stick/*.example "$S/"
 VERSION=$(git describe --always --dirty 2>/dev/null || echo unknown)
 echo "$VERSION" > "$P/VERSION"
 
@@ -149,18 +152,23 @@ Before you start
   - A FAT32 USB stick of 8 GB or more.
 
 Install
-  1. Unzip this archive onto the root of the stick. You get a "netcast" folder. (When updating,
-     your authorized_keys, wifi.conf and rc.local stay as they are, but a new debian.img replaces
-     everything you installed or saved in the old one.)
-  2. For SSH: in netcast/mainline, copy authorized_keys.example to authorized_keys and put your
-     public key(s) in the copy, one per line. They log in as root and are copied to root's keys at
-     every boot.
-  3. For Wi-Fi: copy wifi.conf.example to wifi.conf there and fill in the copy (network name,
+  1. Unzip this archive onto the root of the stick. You get a "netcast" folder and three
+     .example files beside it. Your own settings go beside them too, at the root of the stick:
+  2. For SSH: copy authorized_keys.example to authorized_keys and put your public key(s) in the
+     copy, one per line. They log in as root and are copied to root's keys at every boot.
+  3. For Wi-Fi: copy wifi.conf.example to wifi.conf and fill in the copy (network name,
      passphrase).
   4. For commands to run at every boot (mounting disks and shares, the starting volume, a
-     Bluetooth keyboard): copy rc.local.example to rc.local there and uncomment what you want.
+     Bluetooth keyboard): copy rc.local.example to rc.local and uncomment what you want.
      It runs as root; its output goes to rc.local.log beside it.
      The .example files themselves are never read.
+
+Updating
+  Delete the old "netcast" folder and unzip the new release. Your authorized_keys, wifi.conf and
+  rc.local at the root of the stick stay as they are. The new debian.img replaces everything you
+  installed or saved in the old one. Up to 1.1, authorized_keys and wifi.conf lived in
+  netcast/mainline/. They are still read there when the root has none, but go away with that
+  folder: move them to the root first.
 
 Boot
   1. Plug the stick into the TV (LG's system running; nothing needs to be on screen).
@@ -242,7 +250,7 @@ python3 -I - "$S" "$ZIP" <<'PY'
 import os, sys, zipfile
 src, zp = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as z:
-    for root, dirs, files in os.walk(os.path.join(src, "netcast")):
+    for root, dirs, files in os.walk(src):
         dirs.sort()
         for f in sorted(files):
             full = os.path.join(root, f)

@@ -786,8 +786,8 @@ GCC 4.5.1, i686 host binaries). The source is from 2013. The TV's kernel was bui
   stock-side tools (`ncpreflight`, `ncdebug`, `nckey`, `evdump`, `ncnetkeep`, `memscan`), with a README
   and licences (including a Debian package/source list). It has none of ncplus's apps.
   The image carries no SSH keys, and the script refuses one that does. At every boot,
-  root's keys are copied from `<stick>/netcast/mainline/authorized_keys`
-  (`netcast-sshkeys`). Before this, sync-in kept the host uid on the overlay's top
+  root's keys are copied from `authorized_keys` at the root of the stick (in 1.1 and
+  earlier `<stick>/netcast/mainline/authorized_keys`, still read as a fallback; `netcast-sshkeys`). Before this, sync-in kept the host uid on the overlay's top
   directory, so `/` was owned by uid 1000 (now user `tv`). The build now chowns `.` too.
 
 ## Mainline audio: the stock DSP's MixSnd channel (2026-11-24, works: user hears the TV speakers)

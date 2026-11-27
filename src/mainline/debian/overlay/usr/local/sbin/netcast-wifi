@@ -1,5 +1,6 @@
 #!/bin/sh
-# netcast-wifi <out.conf>: make a wpa_supplicant config from <stick>/netcast/mainline/wifi.conf.
+# netcast-wifi <out.conf>: make a wpa_supplicant config from wifi.conf at the root of the stick
+# (or netcast/mainline/wifi.conf, where 1.1 and older read it, when there is none at the root).
 # Exit 1 (netcast-wifi@.service is then skipped) when there is no file or no network in it.
 #
 # wifi.conf is either a full wpa_supplicant.conf (anything with "network={" in it is used
@@ -7,9 +8,10 @@
 #   ssid=My network        (the name exactly as it is, no quotes)
 #   psk=my passphrase      (8-63 characters, or 64 hex digits; empty or missing = open network)
 #   country=US             (optional: the regulatory domain, two letters)
-src=/mnt/stick/netcast/mainline/wifi.conf
+src=/mnt/stick/wifi.conf
+[ -f "$src" ] || src=/mnt/stick/netcast/mainline/wifi.conf
 out=$1
-[ -f "$src" ] || { echo "netcast-wifi: no $src"; exit 1; }
+[ -f "$src" ] || { echo "netcast-wifi: no wifi.conf at the root of the stick"; exit 1; }
 umask 077
 mkdir -p "$(dirname "$out")"
 if grep -q 'network={' "$src"; then

@@ -1,10 +1,9 @@
 #!/bin/bash
-# netcast-rclocal (netcast-rclocal.service): run <stick>/netcast/mainline/rc.local with bash,
-# as root. The stick is FAT, so the file has no exec bit and may have Windows line endings:
-# it runs from a copy without the CRs. Its output goes to the journal
+# netcast-rclocal (netcast-rclocal.service): run rc.local from the root of the stick with bash,
+# as root. The stick is FAT, so the file has no exec bit and may have Windows line
+# endings: it runs from a copy without the CRs. Its output goes to the journal
 # (journalctl -u netcast-rclocal) and to rc.local.log beside it, new at every boot.
-M=/mnt/stick/netcast/mainline
-src=$M/rc.local
+src=/mnt/stick/rc.local
 [ -f "$src" ] || exit 0
 install -d -m 700 /run/netcast
 tr -d '\r' < "$src" > /run/netcast/rc.local
@@ -12,7 +11,7 @@ cd /root || exit 1
 echo "rc.local: running $src"
 # Jobs it leaves in the background (... &) keep the pipe open, so tee goes on logging them
 # and the status line below comes once they are done too.
-bash /run/netcast/rc.local < /dev/null 2>&1 | tee "$M/rc.local.log"
+bash /run/netcast/rc.local < /dev/null 2>&1 | tee /mnt/stick/rc.local.log
 rc=${PIPESTATUS[0]}
 echo "rc.local: exit status $rc"
 exit "$rc"

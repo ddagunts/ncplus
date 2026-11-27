@@ -8,13 +8,13 @@
 # Debian trixie armhf (hard-float; the kernel doesn't care that LG's userspace is
 # soft-float), systemd + networkd DHCP on the USB Ethernet adapter + OpenSSH (key only).
 # USB Wi-Fi: wpa_supplicant per wlan interface (netcast-wifi@.service, started by udev) with
-# the network from <stick>/netcast/mainline/wifi.conf, then networkd DHCP.
+# the network from wifi.conf at the root of the stick, then networkd DHCP.
 # Needs mmdebstrap and qemu-user-static (binfmt) on the host; no root: mmdebstrap runs in
 # a user namespace and mke2fs builds the image straight from the tarball.
 #
 # SSH: root by key only; tv by password, once one is set. The image has no keys unless $NETCAST_SSH_KEY names a .pub file to bake in
 # (for a private image; never for one you hand out). Otherwise root's keys come from
-# <stick>/netcast/mainline/authorized_keys at every boot (netcast-sshkeys). Host keys are
+# authorized_keys at the root of the stick at every boot (netcast-sshkeys). Host keys are
 # made on the TV at first start. Root has no password: the panel's tty1 autologins (USB keyboard).
 #
 # Desktop: Xfce on Xorg (modesetting on the mt5398_osd KMS driver, CPU rendering), lightdm

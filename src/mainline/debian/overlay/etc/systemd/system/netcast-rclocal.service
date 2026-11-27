@@ -1,10 +1,10 @@
-# The stick's own boot script: <stick>/netcast/mainline/rc.local, run once per boot as root
+# The stick's own boot script: rc.local at the root of the stick, run once per boot as root
 # (netcast-rclocal; src/mainline/stick/rc.local.example). Started once the network, Bluetooth
 # and sound services are, but nothing waits for it: the desktop comes up while it runs, and it
 # may take as long as it likes (no timeout). What it leaves running in the background stays up.
 [Unit]
-Description=NetCast: the stick's rc.local (netcast/mainline/rc.local)
-ConditionPathExists=/mnt/stick/netcast/mainline/rc.local
+Description=NetCast: rc.local on the stick
+ConditionPathExists=/mnt/stick/rc.local
 RequiresMountsFor=/mnt/stick
 After=network.target bluetooth.service sound.target systemd-user-sessions.service
 

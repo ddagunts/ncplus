@@ -23,16 +23,18 @@ You need a root shell on the TV (telnet, see [openlgtv](https://github.com/openl
 1. Download the release zip, `netcast-debian.zip`, from the
    [releases page](https://github.com/ddagunts/ncplus/releases).
 2. Extract the release zip such that the `netcast` folder goes to the root of the flash drive.
-3. In `netcast/mainline/`, copy the example files and edit the copies. All are optional:
+3. At the root of the stick, next to the `netcast` folder, copy the example files and edit the copies. All
+   are optional:
    - `wifi.conf.example` to `wifi.conf`: network name and passphrase, for an AR9170 USB adapter ([Wi-Fi](#wi-fi))
    - `authorized_keys.example` to `authorized_keys`: your public SSH key ([SSH](#ssh))
    - `rc.local.example` to `rc.local`: commands to run at every boot, such as mounts, the volume or a
      Bluetooth keyboard ([Boot script](#boot-script-rclocal))
 
    ```sh
-   cd netcast/mainline                          # on the stick
+   cd /media/you/STICK                          # the root of the stick
    cp wifi.conf.example wifi.conf
    cp authorized_keys.example authorized_keys
+   cp rc.local.example rc.local
    ```
 4. Eject the stick, plug it into the TV with a USB keyboard and mouse, and run this in the TV's root shell:
 
@@ -78,10 +80,10 @@ You need:
 - a USB Ethernet adapter, if you want a network
 
 1. Extract the release zip, `netcast-debian.zip` (or [build it](#building)), such that the `netcast` folder
-   goes to the root of the flash drive. Set up [SSH](#ssh) and
-   [Wi-Fi](#wi-fi) now if you want them, and a [boot script](#boot-script-rclocal): copy the `.example`
-   files in `netcast/mainline/` to `authorized_keys`, `wifi.conf` and `rc.local` and edit the copies. Nothing
-   reads the `.example` files themselves.
+   goes to the root of the flash drive. Set up [SSH](#ssh) and [Wi-Fi](#wi-fi) now if you want them, and a
+   [boot script](#boot-script-rclocal): the zip puts three `.example` files at the root of the stick, next to
+   the `netcast` folder. Copy them to `authorized_keys`, `wifi.conf` and `rc.local` in the same place and edit
+   the copies. Nothing reads the `.example` files themselves.
 2. From LG's shell, do a dry run. It runs the checks and boots nothing:
    ```sh
    sh /mnt/usb/usb*/Drive1/netcast/mainline/fire.sh probe
@@ -93,15 +95,18 @@ You need:
 
 `sudo reboot` goes back to LG's system.
 
-Unzipping a newer version leaves your `authorized_keys`, `wifi.conf` and `rc.local` alone. A new `debian.img` replaces
-the old one, including the packages you installed and the files you saved in it.
+To update, delete the `netcast` folder and extract the new zip. Your `authorized_keys`, `wifi.conf` and
+`rc.local` are outside that folder, so they stay as they are. The new `debian.img` replaces the old one,
+including the packages you installed and the files you saved in it. Up to 1.1, `authorized_keys` and
+`wifi.conf` lived in `netcast/mainline/`. Debian still reads them there when the root of the stick has none,
+but they go when you delete the folder, so move them to the root first.
 
 ### SSH
 
 You log in as **`root`**, with a key:
 
 1. Make a key on your computer, if you don't have one: `ssh-keygen -t ed25519`
-2. In `netcast/mainline/` on the stick, copy
+2. At the root of the stick, copy
    [`authorized_keys.example`](src/mainline/stick/authorized_keys.example) to `authorized_keys`, with nothing
    after the name (Windows may add a hidden `.txt`). Add a line to the copy with your public key, the contents
    of `~/.ssh/id_ed25519.pub`. One key per line, without a `#` in front. Never put a private key there.
@@ -121,7 +126,7 @@ to the desktop user.
 ### Wi-Fi
 
 This needs a USB adapter with an Atheros AR9170 chip, for example a Netgear WN111v2. The TV's built-in Wi-Fi
-has no Linux driver. In `netcast/mainline/` on the stick, copy
+has no Linux driver. At the root of the stick, copy
 [`wifi.conf.example`](src/mainline/stick/wifi.conf.example) to `wifi.conf` and fill in the copy:
 
 ```
@@ -137,7 +142,7 @@ country=US
   with `network={` in it is used unchanged.
 
 Plug in the adapter and boot. The address comes by DHCP, and Ethernet is preferred when both are connected.
-In Debian the file is `/mnt/stick/netcast/mainline/wifi.conf`. After editing it, replug the adapter or reboot.
+In Debian the file is `/mnt/stick/wifi.conf`. After editing it, replug the adapter or reboot.
 If it doesn't connect, check the log:
 
 ```sh
@@ -159,9 +164,9 @@ SMB 1 isn't built in. To mount at boot, put the mount in the [boot script](#boot
 
 ### Boot script (rc.local)
 
-In `netcast/mainline/` on the stick, copy [`rc.local.example`](src/mainline/stick/rc.local.example) to
-`rc.local` and edit the copy. Debian runs it at every boot, as root, with bash. Being on the stick, it stays in
-place when you unzip a new release, and you can edit it from any computer. The example has commented-out
+At the root of the stick, copy [`rc.local.example`](src/mainline/stick/rc.local.example) to
+`rc.local` and edit the copy. Debian runs it at every boot, as root, with bash. It is outside the `netcast` folder, so it stays
+in place when you update, and you can edit it from any computer. The example has commented-out
 recipes. Remove the `#` in front of the lines you want and fill in your own names and addresses:
 
 - mounting a USB disk by its label (FAT32 or ext4), a Samba or Windows share, and an NFS export, once the
@@ -181,7 +186,7 @@ slow steps in the background with `&`, as the recipes do. Windows line endings a
 sudo journalctl -b -u netcast-rclocal
 ```
 
-In Debian the file is `/mnt/stick/netcast/mainline/rc.local`. To run it again without a reboot, use
+In Debian the file is `/mnt/stick/rc.local`. To run it again without a reboot, use
 `sudo systemctl restart netcast-rclocal`.
 
 ### Screen and backlight

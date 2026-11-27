@@ -1,9 +1,11 @@
 #!/bin/sh
 # Root's SSH keys come from the stick, so one image serves everyone: put your public key(s)
-# in <stick>/netcast/mainline/authorized_keys (one per line). Run before sshd starts
+# in authorized_keys at the root of the stick (one per line; netcast/mainline/authorized_keys,
+# where 1.1 and older read it, is used when there is none at the root). Run before sshd starts
 # (ssh.service.d/hostkeys.conf). Without the file, or with only comments in it, the keys already
 # in the image are kept.
-k=/mnt/stick/netcast/mainline/authorized_keys
+k=/mnt/stick/authorized_keys
+[ -f "$k" ] || k=/mnt/stick/netcast/mainline/authorized_keys
 [ -f "$k" ] || exit 0
 grep -q '^[[:space:]]*[^#[:space:]]' "$k" || exit 0
 install -d -m 700 /root/.ssh

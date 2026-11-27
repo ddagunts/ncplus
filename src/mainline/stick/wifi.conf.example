@@ -1,5 +1,6 @@
 # EXAMPLE: this file is not read. Copy it to "wifi.conf" in the same folder
-# (netcast/mainline/ on the stick; no ".example" or ".txt" at the end) and edit the copy.
+# (the root of the stick, next to the "netcast" folder; no ".example" or ".txt" at the end)
+# and edit the copy. Unzipping a newer release leaves the copy alone.
 #
 # Wi-Fi for Debian, with a USB Wi-Fi adapter on an Atheros AR9170 chip (carl9170 driver),
 # e.g. the Netgear WN111v2. The TV's built-in Wi-Fi has no Linux driver.

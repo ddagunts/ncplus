@@ -1,8 +1,8 @@
 # wpa_supplicant on Wi-Fi interface %I, started by udev (80-netcast-wifi.rules). Its config
-# is made from <stick>/netcast/mainline/wifi.conf (netcast-wifi); no file = not started.
+# is made from wifi.conf at the root of the stick (netcast-wifi); no file = not started.
 # systemd-networkd does DHCP once it is associated (25-wireless.network).
 [Unit]
-Description=Wi-Fi on %I (netcast/mainline/wifi.conf)
+Description=Wi-Fi on %I (wifi.conf on the stick)
 BindsTo=sys-subsystem-net-devices-%i.device
 After=sys-subsystem-net-devices-%i.device
 Before=network.target

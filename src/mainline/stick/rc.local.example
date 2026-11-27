@@ -1,5 +1,6 @@
 # EXAMPLE: this file is not read. Copy it to "rc.local" in the same folder
-# (netcast/mainline/ on the stick; no ".example" or ".txt" at the end) and edit the copy.
+# (the root of the stick, next to the "netcast" folder; no ".example" or ".txt" at the end)
+# and edit the copy. Unzipping a newer release leaves the copy alone.
 #
 # Debian runs rc.local at every boot, as root, with bash. It starts once the network,
 # Bluetooth and sound services have started (the network itself may not be up yet: the
@@ -8,8 +9,8 @@
 #
 # Its output goes to rc.local.log beside it (new at every boot) and to the journal:
 #   sudo journalctl -b -u netcast-rclocal
-# Windows line endings are fine. In Debian this file is /mnt/stick/netcast/mainline/rc.local;
-# after editing it, reboot or run: sudo systemctl restart netcast-rclocal
+# Windows line endings are fine. In Debian this file is /mnt/stick/rc.local; after editing
+# it, reboot or run: sudo systemctl restart netcast-rclocal
 #
 # Remove the "#" in front of the lines you want and put in your own names and addresses.
 # Leave the helpers below as they are. Uncomment "set -x" to log each command as it runs.
