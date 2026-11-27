@@ -22,7 +22,8 @@ You need a root shell on the TV (telnet, see [openlgtv](https://github.com/openl
 
 1. Download the release zip, `netcast-debian.zip`, from the
    [releases page](https://github.com/ddagunts/ncplus/releases).
-2. Extract the release zip such that the `netcast` folder goes to the root of the flash drive.
+2. Extract the release zip to the root of the flash drive: the `netcast` folder and three `.example` files
+   go there.
 3. At the root of the stick, next to the `netcast` folder, copy the example files and edit the copies. All
    are optional:
    - `wifi.conf.example` to `wifi.conf`: network name and passphrase, for an AR9170 USB adapter ([Wi-Fi](#wi-fi))
@@ -45,7 +46,8 @@ You need a root shell on the TV (telnet, see [openlgtv](https://github.com/openl
    ```
 
 The telnet session drops and the desktop is up in about a minute. `sudo reboot` goes back to LG's system.
-The details are in [Getting started](#getting-started).
+To update later, delete the `netcast` folder and extract the new zip: your settings at the root stay
+([Updating](#updating)). The details are in [Getting started](#getting-started).
 
 ## What works
 
@@ -95,7 +97,9 @@ You need:
 
 `sudo reboot` goes back to LG's system.
 
-To update, delete the `netcast` folder and extract the new zip. Your `authorized_keys`, `wifi.conf` and
+### Updating
+
+Delete the `netcast` folder and extract the new zip. Your `authorized_keys`, `wifi.conf` and
 `rc.local` are outside that folder, so they stay as they are. The new `debian.img` replaces the old one,
 including the packages you installed and the files you saved in it. Up to 1.1, `authorized_keys` and
 `wifi.conf` lived in `netcast/mainline/`. Debian still reads them there when the root of the stick has none,
