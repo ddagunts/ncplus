@@ -121,7 +121,7 @@ mmdebstrap --mode=unshare --variant=minbase --architectures=armhf,armel \
 	--customize-hook='chroot "$1" useradd -m -u 1000 -U -G video,input,render,sudo -s /bin/bash tv && chroot "$1" passwd -dq tv' \
 	--customize-hook='rm -f "$1"/etc/ssh/ssh_host_*' \
 	--customize-hook='ln -sf /run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"' \
-	--customize-hook='chroot "$1" systemctl enable systemd-networkd.service systemd-resolved.service systemd-timesyncd.service ssh.service netcast-autoreboot.service netcast-gfxtest.service netcast-pvr.service lightdm.service' \
+	--customize-hook='chroot "$1" systemctl enable systemd-networkd.service systemd-resolved.service systemd-timesyncd.service ssh.service netcast-autoreboot.service netcast-gfxtest.service netcast-pvr.service lightdm.service netcast-rclocal.service' \
 	--customize-hook='chroot "$1" systemctl mask systemd-firstboot.service systemd-pstore.service' \
 	--customize-hook='chroot "$1" systemctl disable wpa_supplicant.service' \
 	--customize-hook='chroot "$1" systemctl disable rpcbind.service rpcbind.socket nfs-blkmap.service' \

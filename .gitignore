@@ -86,6 +86,8 @@ flashdump/
 # filled-in copies of the .example files (keys, Wi-Fi passphrase)
 /src/mainline/stick/authorized_keys
 /src/mainline/stick/wifi.conf
+/src/mainline/stick/rc.local
+/src/mainline/stick/rc.local.log
 
 # --- Logs & scratch ------------------------------------------------------------
 /logs/

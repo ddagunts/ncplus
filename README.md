@@ -23,9 +23,11 @@ You need a root shell on the TV (telnet, see [openlgtv](https://github.com/openl
 1. Download the release zip, `netcast-debian.zip`, from the
    [releases page](https://github.com/ddagunts/ncplus/releases).
 2. Extract the release zip such that the `netcast` folder goes to the root of the flash drive.
-3. In `netcast/mainline/`, copy the example files and edit the copies. Both are optional:
+3. In `netcast/mainline/`, copy the example files and edit the copies. All are optional:
    - `wifi.conf.example` to `wifi.conf`: network name and passphrase, for an AR9170 USB adapter ([Wi-Fi](#wi-fi))
    - `authorized_keys.example` to `authorized_keys`: your public SSH key ([SSH](#ssh))
+   - `rc.local.example` to `rc.local`: commands to run at every boot, such as mounts, the volume or a
+     Bluetooth keyboard ([Boot script](#boot-script-rclocal))
 
    ```sh
    cd netcast/mainline                          # on the stick
@@ -77,8 +79,9 @@ You need:
 
 1. Extract the release zip, `netcast-debian.zip` (or [build it](#building)), such that the `netcast` folder
    goes to the root of the flash drive. Set up [SSH](#ssh) and
-   [Wi-Fi](#wi-fi) now if you want them: copy the `.example` files in `netcast/mainline/` to
-   `authorized_keys` and `wifi.conf` and edit the copies. Nothing reads the `.example` files themselves.
+   [Wi-Fi](#wi-fi) now if you want them, and a [boot script](#boot-script-rclocal): copy the `.example`
+   files in `netcast/mainline/` to `authorized_keys`, `wifi.conf` and `rc.local` and edit the copies. Nothing
+   reads the `.example` files themselves.
 2. From LG's shell, do a dry run. It runs the checks and boots nothing:
    ```sh
    sh /mnt/usb/usb*/Drive1/netcast/mainline/fire.sh probe
@@ -90,7 +93,7 @@ You need:
 
 `sudo reboot` goes back to LG's system.
 
-Unzipping a newer version leaves your `authorized_keys` and `wifi.conf` alone. A new `debian.img` replaces
+Unzipping a newer version leaves your `authorized_keys`, `wifi.conf` and `rc.local` alone. A new `debian.img` replaces
 the old one, including the packages you installed and the files you saved in it.
 
 ### SSH
@@ -151,7 +154,35 @@ sudo mount -t cifs //192.168.1.20/music /mnt/share -o username=me,uid=tv,gid=tv 
 sudo mount -t nfs 192.168.1.20:/export/music /mnt/share                            # NFS
 ```
 
-SMB 1 isn't built in. To mount at boot, put the share in `/etc/fstab` with `_netdev,nofail,x-systemd.automount`.
+SMB 1 isn't built in. To mount at boot, put the mount in the [boot script](#boot-script-rclocal), or the share in
+`/etc/fstab` with `_netdev,nofail,x-systemd.automount`.
+
+### Boot script (rc.local)
+
+In `netcast/mainline/` on the stick, copy [`rc.local.example`](src/mainline/stick/rc.local.example) to
+`rc.local` and edit the copy. Debian runs it at every boot, as root, with bash. Being on the stick, it stays in
+place when you unzip a new release, and you can edit it from any computer. The example has commented-out
+recipes. Remove the `#` in front of the lines you want and fill in your own names and addresses:
+
+- mounting a USB disk by its label (FAT32 or ext4), a Samba or Windows share, and an NFS export, once the
+  network is up
+- setting the starting volume of the TV speakers, both on the card and in the desktop's PipeWire (which
+  otherwise restores the last volume it saved)
+- connecting a Bluetooth keyboard by its address. The first time, it pairs a keyboard that is in pairing
+  mode. After that it reconnects the keyboard at boot, retrying for 2 minutes. A keyboard that asks for a
+  code has to be paired once from the Bluetooth icon in the panel.
+
+The script starts once the network, Bluetooth and sound services have started. The network itself may not
+be up yet, so the recipes wait for it. Nothing waits for the script, and it can take as long as it needs. Put
+slow steps in the background with `&`, as the recipes do. Windows line endings are fine. The output goes to
+`rc.local.log` beside the script, rewritten at every boot, and to the journal:
+
+```sh
+sudo journalctl -b -u netcast-rclocal
+```
+
+In Debian the file is `/mnt/stick/netcast/mainline/rc.local`. To run it again without a reboot, use
+`sudo systemctl restart netcast-rclocal`.
 
 ### Screen and backlight
 
@@ -375,7 +406,7 @@ built separately. See [docs/ncplus.md](docs/ncplus.md).
 
 | Path | |
 |---|---|
-| `src/mainline/` | the mainline system: kernel config, DTS, MT5398 drivers (`kernel/`) and patches, the initramfs, the Debian overlay, the example `authorized_keys` and `wifi.conf` (`stick/`), `fire.sh` |
+| `src/mainline/` | the mainline system: kernel config, DTS, MT5398 drivers (`kernel/`) and patches, the initramfs, the Debian overlay, the example `authorized_keys`, `wifi.conf` and `rc.local` (`stick/`), `fire.sh` |
 | `src/mainline/sgx/` | the GPU driver: patches to TI's DDK 1.9 kernel module, the MT5398 system layer, EGL window-system module, tests (`sgxgltest`, `sgxscan`, `sgxflip`, `sgxupload`) |
 | `src/kmod/` | kernel modules for LG's 3.0.13 kernel: `nckexec` (warm boot into the mainline kernel, with the display, CPU1 and GPU hand-off), `xpadone` |
 | `src/libnc/` | the native runtime: HOA registration, window, EGL, input, text (FreeType), 2D helpers |
